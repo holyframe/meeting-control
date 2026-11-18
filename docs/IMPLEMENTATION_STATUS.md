@@ -4,7 +4,7 @@
 
 - [x] C++20 / Qt 6 desktop application shell
 - [x] Dark dashboard matching the supplied visual direction
-- [x] Left navigation sidebar
+- [x] Top page bar for Dashboard, Live Diagnostics, Settings, and About
 - [x] Dashboard summary cards
 - [x] Empty managed-meetings state (no fake meeting records)
 - [x] Dedicated Live Diagnostics page

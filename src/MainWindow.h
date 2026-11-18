@@ -110,7 +110,7 @@ private:
         }
     };
 
-    QWidget* createSidebar();
+    QWidget* createPageBar();
     QWidget* createDashboardPage();
     QWidget* createDiagnosticsPage();
     QWidget* createSettingsPage();
@@ -151,10 +151,6 @@ private:
     QPushButton* settingsNavButton_ = nullptr;
     QPushButton* aboutNavButton_ = nullptr;
 
-    QPushButton* sidebarPickUpButton_ = nullptr;
-    QPushButton* sidebarRefreshButton_ = nullptr;
-    QPushButton* sidebarMuteAllButton_ = nullptr;
-
     QPushButton* dashboardPickUpButton_ = nullptr;
     QPushButton* dashboardRefreshButton_ = nullptr;
     QPushButton* dashboardMuteAllButton_ = nullptr;
@@ -166,8 +162,6 @@ private:
     QPlainTextEdit* liveDiagnostics_ = nullptr;
     QPlainTextEdit* accessibilityTree_ = nullptr;
 
-    QLabel* sidebarUiaState_ = nullptr;
-    QLabel* sidebarUiaDetail_ = nullptr;
     QLabel* dashboardChromeSummary_ = nullptr;
 
     QLabel* totalMeetingsValue_ = nullptr;

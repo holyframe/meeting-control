@@ -12,12 +12,10 @@
 #include <QGridLayout>
 #include <QHash>
 #include <QHBoxLayout>
-#include <QIcon>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
-#include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -50,15 +48,14 @@ QFrame* makePanel(QWidget* parent, const QString& objectName = "panel")
     return panel;
 }
 
-QPushButton* makeNavButton(const QString& text, QWidget* parent, bool checkable)
+QPushButton* makeNavButton(const QString& text, QWidget* parent)
 {
     auto* button = new QPushButton(text, parent);
-    button->setObjectName("sidebarNavButton");
-    button->setCheckable(checkable);
+    button->setObjectName("pageNavButton");
+    button->setCheckable(true);
     button->setCursor(Qt::PointingHandCursor);
-    button->setMinimumHeight(44);
-    button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    button->setText("  " + text);
+    button->setMinimumHeight(36);
+    button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     return button;
 }
 
@@ -124,11 +121,11 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* root = new QWidget(this);
     root->setObjectName("appRoot");
-    auto* shell = new QHBoxLayout(root);
+    auto* shell = new QVBoxLayout(root);
     shell->setContentsMargins(0, 0, 0, 0);
     shell->setSpacing(0);
 
-    shell->addWidget(createSidebar());
+    shell->addWidget(createPageBar());
 
     pageStack_ = new QStackedWidget(root);
     pageStack_->setObjectName("pageStack");
@@ -155,13 +152,9 @@ MainWindow::MainWindow(QWidget* parent)
     connect(aboutNavButton_, &QPushButton::clicked,
             this, [this] { navigateTo(3); });
 
-    connect(sidebarPickUpButton_, &QPushButton::clicked,
-            this, &MainWindow::requestMeetingTabImport);
     connect(dashboardPickUpButton_, &QPushButton::clicked,
             this, &MainWindow::requestMeetingTabImport);
 
-    connect(sidebarRefreshButton_, &QPushButton::clicked,
-            this, &MainWindow::refreshChromeWindows);
     connect(dashboardRefreshButton_, &QPushButton::clicked,
             this, &MainWindow::refreshChromeWindows);
 
@@ -217,8 +210,6 @@ MainWindow::MainWindow(QWidget* parent)
     connect(worker_, &UiaWorker::importedMeetingsPrepared,
             this, &MainWindow::onImportedMeetingsPrepared, Qt::QueuedConnection);
 
-    connect(sidebarMuteAllButton_, &QPushButton::clicked,
-            this, &MainWindow::requestMuteAll);
     connect(dashboardMuteAllButton_, &QPushButton::clicked,
             this, &MainWindow::requestMuteAll);
     connect(releaseActiveButton_, &QPushButton::clicked,
@@ -256,90 +247,26 @@ MainWindow::~MainWindow()
     }
 }
 
-QWidget* MainWindow::createSidebar()
+QWidget* MainWindow::createPageBar()
 {
-    auto* sidebar = new QFrame(this);
-    sidebar->setObjectName("sidebar");
-    sidebar->setFixedWidth(286);
+    auto* bar = new QFrame(this);
+    bar->setObjectName("pageBar");
 
-    auto* layout = new QVBoxLayout(sidebar);
-    layout->setContentsMargins(18, 22, 18, 18);
+    auto* layout = new QHBoxLayout(bar);
+    layout->setContentsMargins(20, 10, 20, 10);
     layout->setSpacing(8);
 
-    auto* brandRow = new QHBoxLayout();
-    brandRow->setSpacing(11);
-
-    auto* logo = new QLabel(sidebar);
-    logo->setObjectName("brandLogo");
-    logo->setAlignment(Qt::AlignCenter);
-    logo->setFixedSize(48, 48);
-    const qreal logoScale = logo->devicePixelRatioF();
-    logo->setPixmap(QIcon(QStringLiteral(":/icons/app.ico")).pixmap(QSize(48, 48), logoScale));
-
-    auto* brandText = new QVBoxLayout();
-    brandText->setSpacing(1);
-    auto* brandName = new QLabel("Meeting Controller", sidebar);
-    brandName->setObjectName("brandName");
-    auto* brandSubtitle = makeMutedLabel("Chrome · Zoom · UI Automation", sidebar);
-    brandSubtitle->setObjectName("brandSubtitle");
-    brandText->addWidget(brandName);
-    brandText->addWidget(brandSubtitle);
-
-    brandRow->addWidget(logo);
-    brandRow->addLayout(brandText, 1);
-    layout->addLayout(brandRow);
-    layout->addSpacing(28);
-
-    dashboardNavButton_ = makeNavButton("⌂   Dashboard", sidebar, true);
-    sidebarPickUpButton_ = makeNavButton("＋   Pick Up Meeting Tabs", sidebar, false);
-    sidebarRefreshButton_ = makeNavButton("⟳   Refresh Chrome Windows", sidebar, false);
-    sidebarMuteAllButton_ = makeNavButton("◉   Mute All Meetings", sidebar, false);
+    dashboardNavButton_ = makeNavButton("Dashboard", bar);
+    diagnosticsNavButton_ = makeNavButton("Live Diagnostics", bar);
+    settingsNavButton_ = makeNavButton("Settings", bar);
+    aboutNavButton_ = makeNavButton("About", bar);
 
     layout->addWidget(dashboardNavButton_);
-    layout->addWidget(sidebarPickUpButton_);
-    layout->addWidget(sidebarRefreshButton_);
-    layout->addWidget(sidebarMuteAllButton_);
-
-    auto* separator = new QFrame(sidebar);
-    separator->setObjectName("sidebarSeparator");
-    separator->setFixedHeight(1);
-    layout->addSpacing(10);
-    layout->addWidget(separator);
-    layout->addSpacing(10);
-
-    diagnosticsNavButton_ = makeNavButton("⌁   Live Diagnostics", sidebar, true);
-    settingsNavButton_ = makeNavButton("⚙   Settings", sidebar, true);
-    aboutNavButton_ = makeNavButton("ⓘ   About", sidebar, true);
-
     layout->addWidget(diagnosticsNavButton_);
     layout->addWidget(settingsNavButton_);
     layout->addWidget(aboutNavButton_);
     layout->addStretch();
-
-    auto* statusCard = makePanel(sidebar, "sidebarStatusCard");
-    auto* statusLayout = new QVBoxLayout(statusCard);
-    statusLayout->setContentsMargins(12, 12, 12, 12);
-    statusLayout->setSpacing(4);
-
-    auto* statusRow = new QHBoxLayout();
-    auto* statusDot = new QLabel("●", statusCard);
-    statusDot->setObjectName("statusDot");
-    sidebarUiaState_ = new QLabel("UIA Idle", statusCard);
-    sidebarUiaState_->setObjectName("sidebarStatusTitle");
-    statusRow->addWidget(statusDot);
-    statusRow->addWidget(sidebarUiaState_);
-    statusRow->addStretch();
-
-    sidebarUiaDetail_ = makeMutedLabel(
-        "Starts when a Chrome window is inspected", statusCard);
-    statusLayout->addLayout(statusRow);
-    statusLayout->addWidget(sidebarUiaDetail_);
-    layout->addWidget(statusCard);
-
-    sidebarMuteAllButton_->setEnabled(false);
-    sidebarMuteAllButton_->setToolTip("Pick up a meeting tab first.");
-
-    return sidebar;
+    return bar;
 }
 
 QWidget* MainWindow::createDashboardPage()
@@ -694,19 +621,7 @@ void MainWindow::updateUiaStatus(bool ready, const QString& message)
         ? "Windows UI Automation initialized"
         : "Initialization failed");
 
-    sidebarUiaState_->setText(ready ? "UIA Ready" : "UIA Unavailable");
-    sidebarUiaDetail_->setText(message);
     statusBar()->showMessage(message);
-
-    if (ready)
-    {
-        sidebarUiaState_->setStyleSheet("color:#86EFAC; font-weight:700;");
-    }
-    else
-    {
-        sidebarUiaState_->setStyleSheet("color:#FCA5A5; font-weight:700;");
-    }
-
     appendLog(message);
 }
 
@@ -716,7 +631,6 @@ void MainWindow::refreshChromeWindows()
         return;
 
     scanInProgress_ = true;
-    sidebarRefreshButton_->setEnabled(false);
     dashboardRefreshButton_->setEnabled(false);
     statusBar()->showMessage("Scanning visible Chrome windows...");
     dashboardChromeSummary_->setText("Scanning Chrome windows...");
@@ -727,7 +641,6 @@ void MainWindow::refreshChromeWindows()
 void MainWindow::onChromeWindowsFound(const QJsonArray& windows)
 {
     scanInProgress_ = false;
-    sidebarRefreshButton_->setEnabled(true);
     dashboardRefreshButton_->setEnabled(true);
 
     chromeWindowCombo_->clear();
@@ -984,7 +897,6 @@ void MainWindow::requestMeetingTabImport()
         return;
 
     pickupInProgress_ = true;
-    sidebarPickUpButton_->setEnabled(false);
     dashboardPickUpButton_->setEnabled(false);
     statusBar()->showMessage("Reading Chrome tabs through UI Automation...");
     appendLog("Chrome tab list requested.");
@@ -994,7 +906,6 @@ void MainWindow::requestMeetingTabImport()
 void MainWindow::onChromeTabsListed(const QJsonObject& result)
 {
     pickupInProgress_ = false;
-    sidebarPickUpButton_->setEnabled(true);
     dashboardPickUpButton_->setEnabled(true);
 
     if (!result.value("ok").toBool())
@@ -1352,13 +1263,11 @@ void MainWindow::refreshMeetingCards()
         : "No meeting is currently marked active.");
 
     const bool canMuteAll = !meetings_.isEmpty() && !meetingBusy_;
-    sidebarMuteAllButton_->setEnabled(canMuteAll);
     dashboardMuteAllButton_->setEnabled(canMuteAll);
 
     const QString muteAllTip = meetings_.isEmpty()
         ? QString("Pick up a meeting tab first.")
         : QString("Switches to each meeting tab in turn and mutes it, verifying each result.");
-    sidebarMuteAllButton_->setToolTip(muteAllTip);
     dashboardMuteAllButton_->setToolTip(muteAllTip);
 }
 
@@ -1404,7 +1313,6 @@ void MainWindow::setMeetingBusy(bool busy, const QString& statusMessage)
     if (!statusMessage.isEmpty())
         statusBar()->showMessage(statusMessage);
 
-    sidebarPickUpButton_->setEnabled(!busy);
     dashboardPickUpButton_->setEnabled(!busy);
     refreshMeetingCards();
 }
@@ -1761,55 +1669,31 @@ void MainWindow::applyDarkProfessionalTheme()
             font-family: "Segoe UI";
             font-size: 10pt;
         }
-        QFrame#sidebar {
+        QFrame#pageBar {
             background: #0D1A2B;
-            border-right: 1px solid #26364A;
+            border-bottom: 1px solid #26364A;
         }
-        QLabel#brandLogo {
-            background: transparent;
-            border: none;
-        }
-        QLabel#brandName {
-            color: #F8FAFC;
-            font-size: 14pt;
-            font-weight: 700;
-        }
-        QLabel#brandSubtitle, QLabel#pageSubtitle, QLabel#mutedText {
+        QLabel#pageSubtitle, QLabel#mutedText {
             color: #9BAEC4;
             font-size: 9pt;
         }
-        QPushButton#sidebarNavButton {
+        QPushButton#pageNavButton {
             color: #D6E0EC;
-            text-align: left;
             background: transparent;
             border: 1px solid transparent;
             border-radius: 8px;
-            padding: 9px 10px;
+            padding: 8px 14px;
             font-size: 10pt;
             font-weight: 600;
         }
-        QPushButton#sidebarNavButton:hover:enabled {
+        QPushButton#pageNavButton:hover:enabled {
             background: #172A42;
         }
-        QPushButton#sidebarNavButton:checked {
+        QPushButton#pageNavButton:checked {
             color: white;
             background: #1265D5;
             border: 1px solid #2783F5;
         }
-        QPushButton#sidebarNavButton:disabled {
-            color: #64748B;
-        }
-        QFrame#sidebarSeparator {
-            background: #26364A;
-            border: none;
-        }
-        QFrame#sidebarStatusCard {
-            background: #112438;
-            border: 1px solid #29425A;
-            border-radius: 9px;
-        }
-        QLabel#statusDot { color: #22C55E; font-size: 12pt; }
-        QLabel#sidebarStatusTitle { color: #E2FBEA; font-weight: 700; }
         QLabel#pageTitle {
             color: #F8FAFC;
             font-size: 24pt;

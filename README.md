@@ -14,10 +14,10 @@
 
 The desktop interface follows the supplied dashboard reference:
 
-- A fixed left sidebar for Dashboard, Pick Up Active Meeting Tab, Refresh Chrome Windows, Mute All Meetings, Live Diagnostics, Settings, and About.
+- A top page bar for Dashboard, Live Diagnostics, Settings, and About. Pick Up, Refresh, and Mute All stay on the dashboard.
 - A dashboard with four summary cards: Total Meetings, Active Meeting, Safety Status, and UIA Connection.
 - A meeting-card area in the main workspace.
-- A dedicated Live Diagnostics page opened from the left sidebar. Diagnostics are not permanently displayed beside the dashboard.
+- A dedicated Live Diagnostics page opened from the top page bar. Diagnostics are not permanently displayed beside the dashboard.
 - A dark navy/blue visual theme with Segoe UI typography.
 
 The meeting list starts empty. The app does not display fabricated meetings or pretend to know a Zoom microphone state.
@@ -102,10 +102,10 @@ Run the application:
 1. Open Chrome normally using your existing profile.
 2. Join one Zoom meeting in Chrome.
 3. Start Meeting Controller. Nothing is scanned or initialized at startup.
-4. Click **Live Diagnostics** in the left sidebar.
+4. Click **Live Diagnostics** in the top page bar.
 5. Click **Refresh** to enumerate visible Chrome windows.
 6. Select the Chrome window containing the Zoom meeting.
-7. Click **Inspect Selected Window**. Windows UI Automation is initialized on the first inspection, and the sidebar status changes to **UIA Ready**.
+7. Click **Inspect Selected Window**. Windows UI Automation is initialized on the first inspection, and the dashboard UIA card changes to **Ready**.
 8. Review the **Accessibility Tree** tab.
 9. Look for `TabItem`, `Document`, and button nodes related to Zoom audio/microphone controls.
 
@@ -156,7 +156,7 @@ Redact meeting titles, participant names, and other private details before shari
 
 ## Source layout
 
-- `src/MainWindow.*` — Qt dashboard, left sidebar, dedicated diagnostics/settings/about pages.
+- `src/MainWindow.*` — Qt dashboard, top page bar, dedicated diagnostics/settings/about pages.
 - `src/ChromeWindowEnumerator.*` — Win32 enumeration of visible Chrome top-level windows.
 - `src/UiaWorker.*` — COM/UIA worker thread and initialization.
 - `src/UiaTreeInspector.*` — bounded Control View tree inspection and JSON serialization.

@@ -1,14 +1,19 @@
 #include "MainWindow.h"
 #include "UiaWorker.h"
 
+#include <algorithm>
+
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -145,9 +150,9 @@ MainWindow::MainWindow(QWidget* parent)
             this, [this] { navigateTo(3); });
 
     connect(sidebarPickUpButton_, &QPushButton::clicked,
-            this, &MainWindow::requestActiveTabPickup);
+            this, &MainWindow::requestMeetingTabImport);
     connect(dashboardPickUpButton_, &QPushButton::clicked,
-            this, &MainWindow::requestActiveTabPickup);
+            this, &MainWindow::requestMeetingTabImport);
 
     connect(sidebarRefreshButton_, &QPushButton::clicked,
             this, &MainWindow::refreshChromeWindows);
@@ -162,19 +167,44 @@ MainWindow::MainWindow(QWidget* parent)
     {
         Q_UNUSED(index);
         inspectButton_->setEnabled(
-            uiaReady_ && !chromeWindowCombo_->currentData().toString().isEmpty());
+            !chromeWindowCombo_->currentData().toString().isEmpty());
     });
 
     workerThread_ = new QThread(this);
     worker_ = new UiaWorker();
     worker_->moveToThread(workerThread_);
 
-    connect(workerThread_, &QThread::started,
-            worker_, &UiaWorker::initialize);
     connect(this, &MainWindow::scanRequested,
             worker_, &UiaWorker::scanChromeWindows, Qt::QueuedConnection);
     connect(this, &MainWindow::inspectRequested,
             worker_, &UiaWorker::inspectWindow, Qt::QueuedConnection);
+    connect(this, &MainWindow::pickupRequested,
+            worker_, &UiaWorker::listChromeTabs, Qt::QueuedConnection);
+    connect(worker_, &UiaWorker::chromeTabsListed,
+            this, &MainWindow::onChromeTabsListed, Qt::QueuedConnection);
+    connect(this, &MainWindow::activationRequested,
+            worker_, &UiaWorker::activateMeeting, Qt::QueuedConnection);
+    connect(worker_, &UiaWorker::meetingActivated,
+            this, &MainWindow::onMeetingActivated, Qt::QueuedConnection);
+    connect(this, &MainWindow::microphoneReadRequested,
+            worker_, &UiaWorker::readMicrophone, Qt::QueuedConnection);
+    connect(worker_, &UiaWorker::microphoneRead,
+            this, &MainWindow::onMicrophoneRead, Qt::QueuedConnection);
+    connect(this, &MainWindow::microphoneSetRequested,
+            worker_, &UiaWorker::setMicrophoneMuted, Qt::QueuedConnection);
+    connect(worker_, &UiaWorker::microphoneSet,
+            this, &MainWindow::onMicrophoneSet, Qt::QueuedConnection);
+    connect(this, &MainWindow::muteAllRequested,
+            worker_, &UiaWorker::muteAll, Qt::QueuedConnection);
+    connect(worker_, &UiaWorker::muteAllFinished,
+            this, &MainWindow::onMuteAllFinished, Qt::QueuedConnection);
+
+    connect(sidebarMuteAllButton_, &QPushButton::clicked,
+            this, &MainWindow::requestMuteAll);
+    connect(dashboardMuteAllButton_, &QPushButton::clicked,
+            this, &MainWindow::requestMuteAll);
+    connect(releaseActiveButton_, &QPushButton::clicked,
+            this, &MainWindow::releaseActiveMeeting);
     connect(worker_, &UiaWorker::initialized,
             this, &MainWindow::onInitialized, Qt::QueuedConnection);
     connect(worker_, &UiaWorker::chromeWindowsFound,
@@ -189,7 +219,7 @@ MainWindow::MainWindow(QWidget* parent)
     applyDarkProfessionalTheme();
     navigateTo(0);
     statusBar()->showMessage(
-        "Starting Windows UI Automation · Microphone automation is not enabled");
+        "Ready · Microphone automation is not enabled");
     workerThread_->start();
 }
 
@@ -241,7 +271,7 @@ QWidget* MainWindow::createSidebar()
     layout->addSpacing(28);
 
     dashboardNavButton_ = makeNavButton("⌂   Dashboard", sidebar, true);
-    sidebarPickUpButton_ = makeNavButton("＋   Pick Up Active Meeting Tab", sidebar, false);
+    sidebarPickUpButton_ = makeNavButton("＋   Pick Up Meeting Tabs", sidebar, false);
     sidebarRefreshButton_ = makeNavButton("⟳   Refresh Chrome Windows", sidebar, false);
     sidebarMuteAllButton_ = makeNavButton("◉   Mute All Meetings", sidebar, false);
 
@@ -274,21 +304,20 @@ QWidget* MainWindow::createSidebar()
     auto* statusRow = new QHBoxLayout();
     auto* statusDot = new QLabel("●", statusCard);
     statusDot->setObjectName("statusDot");
-    sidebarUiaState_ = new QLabel("UIA Initializing", statusCard);
+    sidebarUiaState_ = new QLabel("UIA Idle", statusCard);
     sidebarUiaState_->setObjectName("sidebarStatusTitle");
     statusRow->addWidget(statusDot);
     statusRow->addWidget(sidebarUiaState_);
     statusRow->addStretch();
 
     sidebarUiaDetail_ = makeMutedLabel(
-        "Windows UI Automation is starting", statusCard);
+        "Starts when a Chrome window is inspected", statusCard);
     statusLayout->addLayout(statusRow);
     statusLayout->addWidget(sidebarUiaDetail_);
     layout->addWidget(statusCard);
 
     sidebarMuteAllButton_->setEnabled(false);
-    sidebarMuteAllButton_->setToolTip(
-        "Disabled until Zoom microphone controls can be identified and verified.");
+    sidebarMuteAllButton_->setToolTip("Pick up a meeting tab first.");
 
     return sidebar;
 }
@@ -319,7 +348,7 @@ QWidget* MainWindow::createDashboardPage()
     headerLayout->addStretch();
 
     dashboardChromeSummary_ = makeMutedLabel(
-        "0 Chrome windows detected", header);
+        "Chrome windows not scanned yet", header);
     dashboardChromeSummary_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     headerLayout->addWidget(dashboardChromeSummary_);
     layout->addWidget(header);
@@ -337,11 +366,11 @@ QWidget* MainWindow::createDashboardPage()
         "#078A59", &activeMeetingValue_, &activeMeetingDetail_), 0, 1);
 
     metrics->addWidget(makeMetricCard(
-        page, "◉", "Safety Status", "Not verified", "Microphone controls are locked",
+        page, "◉", "Safety Status", "Verified", "Mic state is re-read after each change",
         "#078A59", &safetyValue_, &safetyDetail_), 0, 2);
 
     metrics->addWidget(makeMetricCard(
-        page, "▣", "UIA Connection", "Starting", "Windows UI Automation",
+        page, "▣", "UIA Connection", "Idle", "Starts on first inspection",
         "#1765C5", &uiaValue_, &uiaDetail_), 0, 3);
 
     for (int column = 0; column < 4; ++column)
@@ -351,7 +380,7 @@ QWidget* MainWindow::createDashboardPage()
     auto* actionRow = new QHBoxLayout();
     actionRow->setSpacing(12);
 
-    dashboardPickUpButton_ = new QPushButton("＋  Pick Up Active Meeting Tab", page);
+    dashboardPickUpButton_ = new QPushButton("＋  Pick Up Meeting Tabs", page);
     dashboardPickUpButton_->setObjectName("primaryButton");
     dashboardPickUpButton_->setMinimumHeight(50);
 
@@ -363,14 +392,13 @@ QWidget* MainWindow::createDashboardPage()
     dashboardMuteAllButton_->setObjectName("dangerButton");
     dashboardMuteAllButton_->setMinimumHeight(50);
     dashboardMuteAllButton_->setEnabled(false);
-    dashboardMuteAllButton_->setToolTip(
-        "Microphone automation is disabled until the Zoom control and its resulting state can be verified.");
+    dashboardMuteAllButton_->setToolTip("Pick up a meeting tab first.");
 
     releaseActiveButton_ = new QPushButton("▷  Release Active Meeting", page);
     releaseActiveButton_->setObjectName("secondaryButton");
     releaseActiveButton_->setMinimumHeight(50);
     releaseActiveButton_->setEnabled(false);
-    releaseActiveButton_->setToolTip("No meeting is currently registered as active.");
+    releaseActiveButton_->setToolTip("No meeting is currently marked active.");
 
     actionRow->addWidget(dashboardPickUpButton_, 5);
     actionRow->addWidget(dashboardRefreshButton_, 4);
@@ -397,8 +425,13 @@ QWidget* MainWindow::createDashboardPage()
     auto* meetingsLayout = new QGridLayout(meetingsContent);
     meetingsLayout->setContentsMargins(0, 2, 0, 8);
     meetingsLayout->setSpacing(14);
+    meetingsLayout->setAlignment(Qt::AlignTop);
+    for (int column = 0; column < 3; ++column)
+        meetingsLayout->setColumnStretch(column, 1);
+    meetingsLayout_ = meetingsLayout;
 
     auto* emptyCard = makePanel(meetingsContent, "emptyMeetingsCard");
+    meetingEmptyCard_ = emptyCard;
     auto* emptyLayout = new QVBoxLayout(emptyCard);
     emptyLayout->setContentsMargins(24, 34, 24, 34);
     emptyLayout->setSpacing(10);
@@ -410,8 +443,7 @@ QWidget* MainWindow::createDashboardPage()
     auto* emptyTitle = new QLabel("No meetings picked up", emptyCard);
     emptyTitle->setObjectName("emptyTitle");
     auto* emptyDescription = makeMutedLabel(
-        "Switch to a Zoom meeting tab in Chrome, then choose "
-        "Pick Up Active Meeting Tab. Only the active Zoom tab will be considered.",
+        "Choose Pick Up Meeting Tabs, then select one or more Chrome tabs to import.",
         emptyCard);
     emptyDescription->setAlignment(Qt::AlignCenter);
     emptyDescription->setMaximumWidth(520);
@@ -425,7 +457,7 @@ QWidget* MainWindow::createDashboardPage()
     layout->addWidget(meetingsArea, 1);
 
     auto* footerHint = makeMutedLabel(
-        "Meeting Controller does not change microphone state until the target Zoom control is identified and its state can be verified.",
+        "Muting reads Zoom's microphone control first, acts only when the state differs, and re-reads it to confirm the result.",
         page);
     layout->addWidget(footerHint);
 
@@ -466,7 +498,7 @@ QWidget* MainWindow::createDiagnosticsPage()
     chromeWindowCombo_ = new QComboBox(browserPanel);
     chromeWindowCombo_->setObjectName("chromeWindowCombo");
     chromeWindowCombo_->setMinimumWidth(340);
-    chromeWindowCombo_->addItem("No Chrome windows detected", QString());
+    chromeWindowCombo_->addItem("Click Refresh to list Chrome windows", QString());
 
     auto* refreshButton = new QPushButton("⟳  Refresh", browserPanel);
     refreshButton->setObjectName("secondaryButton");
@@ -504,7 +536,7 @@ QWidget* MainWindow::createDiagnosticsPage()
     layout->addWidget(diagnosticsTabs_, 1);
 
     auto* note = makeMutedLabel(
-        "Read-only diagnostics. This build does not click page controls, pick up meeting tabs, or mute/unmute Zoom.",
+        "Read-only diagnostics. This build does not click page controls or mute/unmute Zoom.",
         page);
     layout->addWidget(note);
 
@@ -595,8 +627,8 @@ QWidget* MainWindow::createAboutPage()
         "C++20 · Qt 6 Widgets · Windows UI Automation · CMake", panel);
     technology->setObjectName("settingsBody");
     auto* scope = makeMutedLabel(
-        "Current scope: Chrome window discovery and accessibility-tree inspection. "
-        "Active-tab pickup and microphone control are not implemented yet.", panel);
+        "Current scope: Chrome window discovery, accessibility-tree inspection, and "
+        "picking up Chrome tabs you choose. Microphone control is not implemented yet.", panel);
     panelLayout->addWidget(appName);
     panelLayout->addWidget(version);
     panelLayout->addWidget(technology);
@@ -628,13 +660,7 @@ void MainWindow::navigateTo(int pageIndex)
 
 void MainWindow::onInitialized(bool success, const QString& message)
 {
-    uiaReady_ = success;
     updateUiaStatus(success, message);
-
-    if (success)
-        refreshChromeWindows();
-    else
-        appendLog(message);
 }
 
 void MainWindow::updateUiaStatus(bool ready, const QString& message)
@@ -663,7 +689,7 @@ void MainWindow::updateUiaStatus(bool ready, const QString& message)
 
 void MainWindow::refreshChromeWindows()
 {
-    if (!uiaReady_ || scanInProgress_)
+    if (scanInProgress_)
         return;
 
     scanInProgress_ = true;
@@ -706,7 +732,7 @@ void MainWindow::onChromeWindowsFound(const QJsonArray& windows)
     dashboardChromeSummary_->setText(
         QString("%1 Chrome window(s) detected").arg(count));
     inspectButton_->setEnabled(
-        uiaReady_ && !chromeWindowCombo_->currentData().toString().isEmpty());
+        !chromeWindowCombo_->currentData().toString().isEmpty());
 
     statusBar()->showMessage(
         QString("Chrome scan complete · %1 visible window(s) detected").arg(count));
@@ -760,18 +786,695 @@ void MainWindow::onInspectionFinished(const QJsonObject& result)
     }
 
     inspectButton_->setEnabled(
-        uiaReady_ && !chromeWindowCombo_->currentData().toString().isEmpty());
+        !chromeWindowCombo_->currentData().toString().isEmpty());
 }
 
-void MainWindow::requestActiveTabPickup()
+namespace
 {
-    appendLog("Active meeting tab pickup requested. Feature is not implemented in this build.");
-    QMessageBox::information(
+QString tabDetailText(const QJsonObject& tab)
+{
+    QStringList parts;
+
+    if (tab.value("zoomMeeting").toBool())
+        parts.append(QString("Zoom meeting %1").arg(tab.value("meetingId").toString()));
+    else if (tab.value("addressKnown").toBool())
+        parts.append(tab.value("host").toString());
+    else
+        parts.append("Address not read");
+
+    if (tab.value("selected").toBool())
+        parts.append("Shown in this window");
+
+    const QString windowTitle = tab.value("windowTitle").toString();
+    if (!windowTitle.isEmpty())
+        parts.append(windowTitle);
+
+    return parts.join("   ·   ");
+}
+
+QList<int> askTabsToImport(QWidget* parent, const QJsonArray& tabs)
+{
+    QDialog dialog(parent);
+    dialog.setObjectName("tabImportDialog");
+    dialog.setWindowTitle("Import meeting tabs");
+    dialog.setModal(true);
+    dialog.resize(760, 560);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(20, 18, 20, 16);
+    layout->setSpacing(12);
+
+    auto* intro = new QLabel(
+        "Every Chrome tab is listed. Check one or more tabs to import. "
+        "Chrome reports a page address only for the tab currently shown in each window, "
+        "so other tabs are listed by title.",
+        &dialog);
+    intro->setObjectName("settingsBody");
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+
+    auto* scroll = new QScrollArea(&dialog);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+
+    auto* listHost = new QWidget(scroll);
+    auto* listLayout = new QVBoxLayout(listHost);
+    listLayout->setContentsMargins(0, 0, 8, 0);
+    listLayout->setSpacing(8);
+
+    QList<QCheckBox*> boxes;
+    boxes.reserve(tabs.size());
+
+    for (const QJsonValue& value : tabs)
+    {
+        const QJsonObject tab = value.toObject();
+        auto* row = new QWidget(listHost);
+        row->setObjectName("tabImportRow");
+        auto* rowLayout = new QVBoxLayout(row);
+        rowLayout->setContentsMargins(12, 10, 12, 10);
+        rowLayout->setSpacing(2);
+
+        const QString name = tab.value("tabName").toString().isEmpty()
+            ? QString("Untitled tab")
+            : tab.value("tabName").toString();
+
+        auto* box = new QCheckBox(name, row);
+        box->setObjectName("tabImportCheck");
+        auto* detail = new QLabel(tabDetailText(tab), row);
+        detail->setObjectName("mutedText");
+        detail->setWordWrap(true);
+        detail->setContentsMargins(26, 0, 0, 0);
+
+        rowLayout->addWidget(box);
+        rowLayout->addWidget(detail);
+        listLayout->addWidget(row);
+        boxes.append(box);
+    }
+
+    listLayout->addStretch();
+    scroll->setWidget(listHost);
+    layout->addWidget(scroll, 1);
+
+    auto* buttons = new QHBoxLayout();
+    auto* selectAll = new QPushButton("Select all", &dialog);
+    auto* clear = new QPushButton("Clear", &dialog);
+    auto* cancel = new QPushButton("Cancel", &dialog);
+    auto* import = new QPushButton("Import", &dialog);
+    import->setObjectName("primaryButton");
+    import->setDefault(true);
+    import->setEnabled(false);
+
+    buttons->addWidget(selectAll);
+    buttons->addWidget(clear);
+    buttons->addStretch();
+    buttons->addWidget(cancel);
+    buttons->addWidget(import);
+    layout->addLayout(buttons);
+
+    const auto updateImportEnabled = [boxes, import]
+    {
+        const bool anyChecked = std::any_of(
+            boxes.cbegin(), boxes.cend(),
+            [](const QCheckBox* box) { return box->isChecked(); });
+        import->setEnabled(anyChecked);
+    };
+
+    for (QCheckBox* box : boxes)
+        QObject::connect(box, &QCheckBox::toggled, &dialog, updateImportEnabled);
+
+    QObject::connect(selectAll, &QPushButton::clicked, &dialog, [boxes, updateImportEnabled]
+    {
+        for (QCheckBox* box : boxes)
+            box->setChecked(true);
+        updateImportEnabled();
+    });
+    QObject::connect(clear, &QPushButton::clicked, &dialog, [boxes, updateImportEnabled]
+    {
+        for (QCheckBox* box : boxes)
+            box->setChecked(false);
+        updateImportEnabled();
+    });
+    QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
+    QObject::connect(import, &QPushButton::clicked, &dialog, &QDialog::accept);
+
+    if (dialog.exec() != QDialog::Accepted)
+        return {};
+
+    QList<int> selected;
+    for (int index = 0; index < boxes.size(); ++index)
+    {
+        if (boxes.at(index)->isChecked())
+            selected.append(index);
+    }
+    return selected;
+}
+}
+
+void MainWindow::requestMeetingTabImport()
+{
+    if (pickupInProgress_)
+        return;
+
+    pickupInProgress_ = true;
+    sidebarPickUpButton_->setEnabled(false);
+    dashboardPickUpButton_->setEnabled(false);
+    statusBar()->showMessage("Reading Chrome tabs through UI Automation...");
+    appendLog("Chrome tab list requested.");
+    emit pickupRequested();
+}
+
+void MainWindow::onChromeTabsListed(const QJsonObject& result)
+{
+    pickupInProgress_ = false;
+    sidebarPickUpButton_->setEnabled(true);
+    dashboardPickUpButton_->setEnabled(true);
+
+    if (!result.value("ok").toBool())
+    {
+        const QString error = result.value("error").toString();
+        statusBar()->showMessage("Could not list Chrome tabs");
+        appendLog("Chrome tab list failed: " + error);
+        QMessageBox::warning(this, "Could not list Chrome tabs", error);
+        return;
+    }
+
+    const QJsonArray tabs = result.value("tabs").toArray();
+    appendLog(QString("Found %1 Chrome tab(s) across %2 window(s).")
+                  .arg(tabs.size())
+                  .arg(result.value("windowCount").toInt()));
+
+    const QList<int> selected = askTabsToImport(this, tabs);
+    if (selected.isEmpty())
+    {
+        statusBar()->showMessage("Tab import cancelled");
+        appendLog("Tab import cancelled.");
+        return;
+    }
+
+    int imported = 0;
+    int skipped = 0;
+
+    for (int index : selected)
+    {
+        const QJsonObject tab = tabs.at(index).toObject();
+
+        ManagedMeeting meeting;
+        meeting.windowHandle = tab.value("windowHandle").toString();
+        meeting.processId = tab.value("processId").toInteger();
+        meeting.tabRuntimeId = tab.value("tabRuntimeId").toString();
+        meeting.title = tab.value("tabName").toString();
+        meeting.host = tab.value("host").toString();
+        meeting.meetingId = tab.value("meetingId").toString();
+
+        const bool duplicate = std::any_of(
+            meetings_.cbegin(), meetings_.cend(),
+            [&meeting](const ManagedMeeting& existing)
+            {
+                if (existing.key() == meeting.key())
+                    return true;
+                return !meeting.meetingId.isEmpty()
+                    && existing.meetingId == meeting.meetingId;
+            });
+
+        if (duplicate)
+        {
+            ++skipped;
+            appendLog(QString("Skipped \"%1\": already managed.").arg(meeting.title));
+            continue;
+        }
+
+        meetings_.append(meeting);
+        ++imported;
+        appendLog(QString("Imported \"%1\" from Chrome window 0x%2%3.")
+                      .arg(meeting.title, meeting.windowHandle)
+                      .arg(meeting.meetingId.isEmpty()
+                               ? QString()
+                               : QString(", meeting %1").arg(meeting.meetingId)));
+    }
+
+    if (imported > 0)
+        refreshMeetingCards();
+
+    statusBar()->showMessage(
+        QString("Imported %1 tab(s) · %2 already managed").arg(imported).arg(skipped));
+}
+
+QFrame* MainWindow::createMeetingCard(const ManagedMeeting& meeting)
+{
+    const QString key = meeting.key();
+    const bool isActive = key == activeMeetingKey_;
+
+    auto* card = makePanel(
+        meetingsLayout_->parentWidget(), isActive ? "meetingCardActive" : "meetingCard");
+    auto* layout = new QVBoxLayout(card);
+    layout->setContentsMargins(16, 14, 16, 14);
+    layout->setSpacing(10);
+
+    auto* headerRow = new QHBoxLayout();
+    headerRow->setSpacing(11);
+
+    auto* iconTile = new QLabel("▣", card);
+    iconTile->setObjectName("meetingIcon");
+    iconTile->setAlignment(Qt::AlignCenter);
+    iconTile->setFixedSize(38, 38);
+
+    auto* titleColumn = new QVBoxLayout();
+    titleColumn->setSpacing(1);
+
+    auto* title = new QLabel(
+        meeting.title.isEmpty() ? "Zoom meeting" : meeting.title, card);
+    title->setObjectName("meetingTitle");
+    title->setWordWrap(true);
+
+    auto* source = makeMutedLabel(
+        QString("Chrome (Window %1)").arg(meeting.windowNumber), card);
+
+    titleColumn->addWidget(title);
+    titleColumn->addWidget(source);
+
+    headerRow->addWidget(iconTile, 0, Qt::AlignTop);
+    headerRow->addLayout(titleColumn, 1);
+
+    if (isActive)
+    {
+        auto* badge = new QLabel("▶ Active", card);
+        badge->setObjectName("activeBadge");
+        headerRow->addWidget(badge, 0, Qt::AlignTop);
+    }
+
+    layout->addLayout(headerRow);
+
+    auto* stateRow = new QHBoxLayout();
+    stateRow->setSpacing(8);
+
+    auto* microphone = new QLabel(card);
+    switch (meeting.microphone)
+    {
+    case Microphone::Muted:
+        microphone->setText("◉ Muted");
+        microphone->setObjectName("micMuted");
+        break;
+    case Microphone::Unmuted:
+        microphone->setText("◉ Unmuted");
+        microphone->setObjectName("micUnmuted");
+        break;
+    case Microphone::AudioNotConnected:
+        microphone->setText("◉ Audio not joined");
+        microphone->setObjectName("micUnknown");
+        break;
+    default:
+        microphone->setText("◉ Mic state not read");
+        microphone->setObjectName("micUnknown");
+        break;
+    }
+
+    auto* identity = makeMutedLabel(
+        meeting.meetingId.isEmpty()
+            ? QString("|   Tab")
+            : QString("|   Zoom Meeting %1").arg(meeting.meetingId),
+        card);
+
+    stateRow->addWidget(microphone);
+    stateRow->addWidget(identity, 1);
+    layout->addLayout(stateRow);
+
+    auto* actionRow = new QHBoxLayout();
+    actionRow->setSpacing(8);
+
+    auto* activateButton = new QPushButton(
+        isActive ? "✓  Set Active" : "▶  Set Active", card);
+    activateButton->setObjectName(isActive ? "primaryButton" : "secondaryButton");
+    connect(activateButton, &QPushButton::clicked,
+            this, [this, key] { activateMeeting(key); });
+
+    QPushButton* microphoneButton = nullptr;
+    switch (meeting.microphone)
+    {
+    case Microphone::Muted:
+        microphoneButton = new QPushButton("◉  Unmute", card);
+        connect(microphoneButton, &QPushButton::clicked,
+                this, [this, key] { setMicrophone(key, false); });
+        break;
+    case Microphone::Unmuted:
+        microphoneButton = new QPushButton("◉  Mute", card);
+        connect(microphoneButton, &QPushButton::clicked,
+                this, [this, key] { setMicrophone(key, true); });
+        break;
+    default:
+        microphoneButton = new QPushButton("◉  Read Mic", card);
+        microphoneButton->setToolTip(
+            "Read Zoom's microphone control in this tab before changing it.");
+        connect(microphoneButton, &QPushButton::clicked,
+                this, [this, key] { readMicrophone(key); });
+        break;
+    }
+    microphoneButton->setObjectName("secondaryButton");
+
+    auto* moreButton = new QPushButton("⋯", card);
+    moreButton->setObjectName("secondaryButton");
+    moreButton->setFixedWidth(40);
+
+    auto* menu = new QMenu(moreButton);
+    menu->addAction("Refresh microphone state",
+                    this, [this, key] { readMicrophone(key); });
+    menu->addAction("Remove from list", this, [this, key] { removeMeeting(key); });
+    moreButton->setMenu(menu);
+
+    activateButton->setEnabled(!meetingBusy_);
+    microphoneButton->setEnabled(!meetingBusy_);
+    moreButton->setEnabled(!meetingBusy_);
+
+    actionRow->addWidget(activateButton, 1);
+    actionRow->addWidget(microphoneButton, 1);
+    actionRow->addWidget(moreButton);
+    layout->addLayout(actionRow);
+
+    return card;
+}
+
+void MainWindow::refreshMeetingCards()
+{
+    for (QFrame* card : std::as_const(meetingCards_))
+    {
+        meetingsLayout_->removeWidget(card);
+        card->deleteLater();
+    }
+    meetingCards_.clear();
+
+    meetingEmptyCard_->setVisible(meetings_.isEmpty());
+
+    QStringList windowOrder;
+    for (ManagedMeeting& meeting : meetings_)
+    {
+        if (!windowOrder.contains(meeting.windowHandle))
+            windowOrder.append(meeting.windowHandle);
+
+        meeting.windowNumber = windowOrder.indexOf(meeting.windowHandle) + 1;
+    }
+
+    for (int index = 0; index < meetings_.size(); ++index)
+    {
+        QFrame* card = createMeetingCard(meetings_.at(index));
+        meetingsLayout_->addWidget(card, index / 3, index % 3);
+        meetingCards_.append(card);
+    }
+
+    const QString count = QString::number(meetings_.size());
+    totalMeetingsValue_->setText(count);
+    totalMeetingsDetail_->setText(
+        meetings_.isEmpty() ? "No tabs picked up yet" : "Picked up from Chrome");
+    meetingCountLabel_->setText(count);
+
+    const ManagedMeeting* active = findMeeting(activeMeetingKey_);
+    activeMeetingValue_->setText(active ? active->title : "None");
+    activeMeetingDetail_->setText(active
+        ? QString("Chrome (Window %1)").arg(active->windowNumber)
+        : "No active meeting selected");
+
+    releaseActiveButton_->setEnabled(active != nullptr && !meetingBusy_);
+    releaseActiveButton_->setToolTip(active
+        ? "Stop treating this meeting as the active one. Zoom is not changed."
+        : "No meeting is currently marked active.");
+
+    const bool canMuteAll = !meetings_.isEmpty() && !meetingBusy_;
+    sidebarMuteAllButton_->setEnabled(canMuteAll);
+    dashboardMuteAllButton_->setEnabled(canMuteAll);
+
+    const QString muteAllTip = meetings_.isEmpty()
+        ? QString("Pick up a meeting tab first.")
+        : QString("Switches to each meeting tab in turn and mutes it, verifying each result.");
+    sidebarMuteAllButton_->setToolTip(muteAllTip);
+    dashboardMuteAllButton_->setToolTip(muteAllTip);
+}
+
+MainWindow::ManagedMeeting* MainWindow::findMeeting(const QString& key)
+{
+    if (key.isEmpty())
+        return nullptr;
+
+    for (ManagedMeeting& meeting : meetings_)
+    {
+        if (meeting.key() == key)
+            return &meeting;
+    }
+
+    return nullptr;
+}
+
+void MainWindow::setMeetingBusy(bool busy, const QString& statusMessage)
+{
+    meetingBusy_ = busy;
+
+    if (!statusMessage.isEmpty())
+        statusBar()->showMessage(statusMessage);
+
+    sidebarPickUpButton_->setEnabled(!busy);
+    dashboardPickUpButton_->setEnabled(!busy);
+    refreshMeetingCards();
+}
+
+void MainWindow::removeMeeting(const QString& key)
+{
+    for (int index = 0; index < meetings_.size(); ++index)
+    {
+        if (meetings_.at(index).key() != key)
+            continue;
+
+        const QString label = meetings_.at(index).meetingId.isEmpty()
+            ? meetings_.at(index).title
+            : QString("meeting %1").arg(meetings_.at(index).meetingId);
+        appendLog(QString("Removed %1 from managed meetings.").arg(label));
+
+        if (activeMeetingKey_ == key)
+            activeMeetingKey_.clear();
+
+        meetings_.removeAt(index);
+        refreshMeetingCards();
+        return;
+    }
+}
+
+void MainWindow::activateMeeting(const QString& key)
+{
+    const ManagedMeeting* meeting = findMeeting(key);
+    if (!meeting || meetingBusy_)
+        return;
+
+    appendLog(QString("Switching Chrome to \"%1\".").arg(meeting->title));
+    setMeetingBusy(true, "Switching Chrome to the meeting tab...");
+    emit activationRequested(
+        meeting->handle(), meeting->tabRuntimeId, meeting->title, key);
+}
+
+void MainWindow::readMicrophone(const QString& key)
+{
+    const ManagedMeeting* meeting = findMeeting(key);
+    if (!meeting || meetingBusy_)
+        return;
+
+    appendLog(QString("Reading the microphone control of \"%1\".").arg(meeting->title));
+    setMeetingBusy(true, "Reading Zoom's microphone control...");
+    emit microphoneReadRequested(
+        meeting->handle(), meeting->tabRuntimeId, meeting->title, key);
+}
+
+void MainWindow::setMicrophone(const QString& key, bool muted)
+{
+    const ManagedMeeting* meeting = findMeeting(key);
+    if (!meeting || meetingBusy_)
+        return;
+
+    appendLog(QString("%1 \"%2\".")
+                  .arg(muted ? "Muting" : "Unmuting", meeting->title));
+    setMeetingBusy(true, muted ? "Muting the meeting..." : "Unmuting the meeting...");
+    emit microphoneSetRequested(
+        meeting->handle(), meeting->tabRuntimeId, meeting->title, muted, key);
+}
+
+void MainWindow::onMeetingActivated(const QJsonObject& result)
+{
+    const QString key = result.value("requestKey").toString();
+
+    if (!result.value("ok").toBool())
+    {
+        const QString error = result.value("error").toString();
+        appendLog("Could not switch to the meeting tab: " + error);
+        setMeetingBusy(false, "Could not switch to the meeting tab");
+        QMessageBox::warning(this, "Could not switch to the meeting tab", error);
+        return;
+    }
+
+    activeMeetingKey_ = key;
+
+    if (ManagedMeeting* meeting = findMeeting(key))
+    {
+        // The runtime ID changes when Chrome rebuilds the tab strip.
+        meeting->tabRuntimeId = result.value("tabRuntimeId").toString();
+        appendLog(QString("\"%1\" is now the active meeting.").arg(meeting->title));
+    }
+
+    setMeetingBusy(false, "Switched Chrome to the meeting tab");
+}
+
+void MainWindow::applyMicrophoneResult(const QJsonObject& result, const QString& action)
+{
+    const QString key = result.value("requestKey").toString();
+    ManagedMeeting* meeting = findMeeting(key);
+
+    if (!result.value("ok").toBool())
+    {
+        const QString error = result.value("error").toString();
+        appendLog(action + " failed: " + error);
+
+        // An unverified change must not leave a stale state on the card.
+        if (meeting && result.contains("verified"))
+            meeting->microphone = Microphone::Unknown;
+
+        setMeetingBusy(false, action + " failed");
+        QMessageBox::warning(this, action + " failed", error);
+        return;
+    }
+
+    const QString state = result.value("state").toString();
+
+    if (meeting)
+    {
+        if (state == "muted")
+            meeting->microphone = Microphone::Muted;
+        else if (state == "unmuted")
+            meeting->microphone = Microphone::Unmuted;
+        else if (state == "audioNotConnected")
+            meeting->microphone = Microphone::AudioNotConnected;
+        else
+            meeting->microphone = Microphone::Unknown;
+
+        if (result.contains("tabRuntimeId"))
+            meeting->tabRuntimeId = result.value("tabRuntimeId").toString();
+    }
+
+    const QString title = meeting ? meeting->title : QString("meeting");
+    const QString verb = result.value("changed").toBool()
+        ? QString("is now")
+        : QString("was already");
+
+    appendLog(result.contains("changed")
+        ? QString("\"%1\" %2 %3 (control reads \"%4\").")
+              .arg(title, verb, state, result.value("controlName").toString())
+        : QString("\"%1\" microphone reads %2 (control reads \"%3\").")
+              .arg(title, state, result.value("controlName").toString()));
+
+    setMeetingBusy(false, QString("%1 · %2").arg(title, state));
+}
+
+void MainWindow::onMicrophoneRead(const QJsonObject& result)
+{
+    applyMicrophoneResult(result, "Reading the microphone");
+}
+
+void MainWindow::onMicrophoneSet(const QJsonObject& result)
+{
+    applyMicrophoneResult(
+        result, result.value("requestedMuted").toBool() ? "Muting" : "Unmuting");
+}
+
+void MainWindow::requestMuteAll()
+{
+    if (meetings_.isEmpty() || meetingBusy_)
+        return;
+
+    const int answer = QMessageBox::question(
         this,
-        "Active tab pickup is not available yet",
-        "This build can discover Chrome windows and inspect their UI Automation tree.\n\n"
-        "It does not yet identify the selected Chrome tab or register Zoom meetings. "
-        "The next implementation step is to validate Chrome's selected TabItem through UI Automation.");
+        "Mute all meetings",
+        QString("Mute %1 managed meeting(s)?\n\n"
+                "Each meeting tab has to be on screen in its Chrome window to be "
+                "controlled, so Chrome will switch tabs while this runs.")
+            .arg(meetings_.size()),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::Yes);
+
+    if (answer != QMessageBox::Yes)
+        return;
+
+    QJsonArray targets;
+    for (const ManagedMeeting& meeting : std::as_const(meetings_))
+    {
+        targets.append(QJsonObject{
+            {"windowHandle", meeting.windowHandle},
+            {"tabRuntimeId", meeting.tabRuntimeId},
+            {"tabName", meeting.title},
+            {"requestKey", meeting.key()}
+        });
+    }
+
+    appendLog(QString("Mute All requested for %1 meeting(s).").arg(targets.size()));
+    setMeetingBusy(true, "Muting every managed meeting...");
+    emit muteAllRequested(targets);
+}
+
+void MainWindow::onMuteAllFinished(const QJsonArray& results)
+{
+    int muted = 0;
+    int alreadyMuted = 0;
+    QStringList failures;
+
+    for (const QJsonValue& value : results)
+    {
+        const QJsonObject result = value.toObject();
+        const QString key = result.value("requestKey").toString();
+        ManagedMeeting* meeting = findMeeting(key);
+        const QString title = meeting ? meeting->title : QString("A meeting");
+
+        if (!result.value("ok").toBool())
+        {
+            if (meeting)
+                meeting->microphone = Microphone::Unknown;
+
+            failures.append(QString("%1: %2").arg(title, result.value("error").toString()));
+            appendLog(QString("Mute All could not mute \"%1\": %2")
+                          .arg(title, result.value("error").toString()));
+            continue;
+        }
+
+        if (meeting)
+            meeting->microphone = Microphone::Muted;
+
+        if (result.value("changed").toBool())
+        {
+            ++muted;
+            appendLog(QString("Mute All muted \"%1\".").arg(title));
+        }
+        else
+        {
+            ++alreadyMuted;
+            appendLog(QString("Mute All left \"%1\" muted; it already was.").arg(title));
+        }
+    }
+
+    setMeetingBusy(false,
+        QString("Mute All · %1 muted, %2 already muted, %3 failed")
+            .arg(muted).arg(alreadyMuted).arg(failures.size()));
+
+    if (!failures.isEmpty())
+    {
+        QMessageBox::warning(
+            this,
+            "Some meetings could not be muted",
+            failures.join("\n\n"));
+    }
+}
+
+void MainWindow::releaseActiveMeeting()
+{
+    if (activeMeetingKey_.isEmpty())
+        return;
+
+    const ManagedMeeting* meeting = findMeeting(activeMeetingKey_);
+    appendLog(QString("Released \"%1\" as the active meeting. Zoom was not changed.")
+                  .arg(meeting ? meeting->title : QString("the meeting")));
+
+    activeMeetingKey_.clear();
+    refreshMeetingCards();
+    statusBar()->showMessage("No meeting is marked active");
 }
 
 void MainWindow::appendLog(const QString& message)
@@ -909,6 +1612,48 @@ void MainWindow::applyDarkProfessionalTheme()
             padding: 3px 8px;
             font-weight: 700;
         }
+        QFrame#meetingCard {
+            background: #17263A;
+            border: 1px solid #2A4059;
+            border-radius: 11px;
+        }
+        QFrame#meetingCardActive {
+            background: #152B46;
+            border: 1px solid #2E8BF5;
+            border-radius: 11px;
+        }
+        QLabel#meetingTitle {
+            color: #F8FAFC;
+            font-size: 11pt;
+            font-weight: 700;
+        }
+        QLabel#meetingIcon {
+            color: white;
+            background: #1765C5;
+            border-radius: 9px;
+            font-size: 15pt;
+            font-weight: 700;
+        }
+        QLabel#activeBadge {
+            color: #052E1A;
+            background: #22C55E;
+            border-radius: 9px;
+            padding: 3px 9px;
+            font-size: 8pt;
+            font-weight: 700;
+        }
+        QLabel#micMuted { color: #4ADE80; font-weight: 700; }
+        QLabel#micUnmuted { color: #FBBF24; font-weight: 700; }
+        QLabel#micUnknown { color: #94A3B8; font-weight: 700; }
+        QPushButton::menu-indicator { image: none; width: 0px; }
+        QMenu {
+            color: #E5EDF7;
+            background: #17263A;
+            border: 1px solid #2A4059;
+            padding: 4px;
+        }
+        QMenu::item { padding: 7px 18px; border-radius: 6px; }
+        QMenu::item:selected { background: #1D4E86; }
         QFrame#emptyMeetingsCard {
             background: #111F31;
             border: 1px dashed #3A506A;
@@ -986,6 +1731,31 @@ void MainWindow::applyDarkProfessionalTheme()
             background: #354B66;
             border-radius: 4px;
             min-height: 28px;
+        }
+        QDialog#tabImportDialog {
+            background: #0B1423;
+            color: #E5E7EB;
+        }
+        QWidget#tabImportRow {
+            background: #17263A;
+            border: 1px solid #2A4059;
+            border-radius: 8px;
+        }
+        QCheckBox#tabImportCheck {
+            color: #F8FAFC;
+            font-weight: 700;
+            spacing: 10px;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border: 1px solid #4C6480;
+            border-radius: 4px;
+            background: #101D2D;
+        }
+        QCheckBox::indicator:checked {
+            background: #0878F9;
+            border-color: #278BFF;
         }
         QStatusBar {
             color: #91A5BC;

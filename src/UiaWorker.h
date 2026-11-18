@@ -22,12 +22,32 @@ public slots:
     void initialize();
     void scanChromeWindows();
     void inspectWindow(quintptr hwndValue);
+    void listChromeTabs();
+    void activateMeeting(quintptr hwndValue,
+                         const QString& tabRuntimeId,
+                         const QString& tabName,
+                         const QString& requestKey);
+    void readMicrophone(quintptr hwndValue,
+                        const QString& tabRuntimeId,
+                        const QString& tabName,
+                        const QString& requestKey);
+    void setMicrophoneMuted(quintptr hwndValue,
+                            const QString& tabRuntimeId,
+                            const QString& tabName,
+                            bool muted,
+                            const QString& requestKey);
+    void muteAll(const QJsonArray& targets);
     void shutdown();
 
 signals:
     void initialized(bool success, const QString& message);
     void chromeWindowsFound(const QJsonArray& windows);
     void inspectionFinished(const QJsonObject& result);
+    void chromeTabsListed(const QJsonObject& result);
+    void meetingActivated(const QJsonObject& result);
+    void microphoneRead(const QJsonObject& result);
+    void microphoneSet(const QJsonObject& result);
+    void muteAllFinished(const QJsonArray& results);
     void diagnostic(const QString& message);
 
 private:

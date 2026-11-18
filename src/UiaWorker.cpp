@@ -1,7 +1,9 @@
 #include "UiaWorker.h"
 
+#include "ActiveTabPicker.h"
 #include "ChromeWindowEnumerator.h"
 #include "UiaTreeInspector.h"
+#include "ZoomMeetingController.h"
 
 #include <QJsonObject>
 
@@ -29,17 +31,23 @@ UiaWorker::~UiaWorker()
 
 void UiaWorker::initialize()
 {
-    const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-
-    if (FAILED(comHr))
-    {
-        emit initialized(false,
-            QString("CoInitializeEx failed: 0x%1")
-                .arg(static_cast<quint32>(comHr), 8, 16, QLatin1Char('0')));
+    if (automation_)
         return;
-    }
 
-    comInitialized_ = true;
+    if (!comInitialized_)
+    {
+        const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+        if (FAILED(comHr))
+        {
+            emit initialized(false,
+                QString("CoInitializeEx failed: 0x%1")
+                    .arg(static_cast<quint32>(comHr), 8, 16, QLatin1Char('0')));
+            return;
+        }
+
+        comInitialized_ = true;
+    }
 
     const HRESULT createHr = CoCreateInstance(
         CLSID_CUIAutomation,
@@ -76,11 +84,13 @@ void UiaWorker::scanChromeWindows()
 
 void UiaWorker::inspectWindow(quintptr hwndValue)
 {
+    initialize();
+
     if (!automation_)
     {
         emit inspectionFinished(QJsonObject{
             {"ok", false},
-            {"error", "UI Automation has not initialized."}
+            {"error", "UI Automation could not be initialized."}
         });
         return;
     }
@@ -91,6 +101,114 @@ void UiaWorker::inspectWindow(quintptr hwndValue)
     const QJsonObject result = inspector.inspectWindow(hwnd);
 
     emit inspectionFinished(result);
+}
+
+void UiaWorker::listChromeTabs()
+{
+    initialize();
+
+    if (!automation_)
+    {
+        emit chromeTabsListed(QJsonObject{
+            {"ok", false},
+            {"error", "UI Automation could not be initialized."}
+        });
+        return;
+    }
+
+    ActiveTabPicker picker(automation_.Get());
+    emit chromeTabsListed(picker.listChromeTabs());
+}
+
+void UiaWorker::activateMeeting(
+    quintptr hwndValue,
+    const QString& tabRuntimeId,
+    const QString& tabName,
+    const QString& requestKey)
+{
+    initialize();
+
+    QJsonObject result = automation_
+        ? ZoomMeetingController(automation_.Get())
+              .activateTab(hwndValue, tabRuntimeId, tabName, true)
+        : QJsonObject{{"ok", false}, {"error", "UI Automation could not be initialized."}};
+
+    result.insert("requestKey", requestKey);
+    emit meetingActivated(result);
+}
+
+void UiaWorker::readMicrophone(
+    quintptr hwndValue,
+    const QString& tabRuntimeId,
+    const QString& tabName,
+    const QString& requestKey)
+{
+    initialize();
+
+    QJsonObject result = automation_
+        ? ZoomMeetingController(automation_.Get())
+              .readMicrophone(hwndValue, tabRuntimeId, tabName)
+        : QJsonObject{{"ok", false}, {"error", "UI Automation could not be initialized."}};
+
+    result.insert("requestKey", requestKey);
+    emit microphoneRead(result);
+}
+
+void UiaWorker::setMicrophoneMuted(
+    quintptr hwndValue,
+    const QString& tabRuntimeId,
+    const QString& tabName,
+    bool muted,
+    const QString& requestKey)
+{
+    initialize();
+
+    QJsonObject result = automation_
+        ? ZoomMeetingController(automation_.Get())
+              .setMicrophoneMuted(hwndValue, tabRuntimeId, tabName, muted)
+        : QJsonObject{{"ok", false}, {"error", "UI Automation could not be initialized."}};
+
+    result.insert("requestKey", requestKey);
+    result.insert("requestedMuted", muted);
+    emit microphoneSet(result);
+}
+
+void UiaWorker::muteAll(const QJsonArray& targets)
+{
+    initialize();
+
+    QJsonArray results;
+
+    if (!automation_)
+    {
+        emit muteAllFinished(results);
+        return;
+    }
+
+    const ZoomMeetingController controller(automation_.Get());
+
+    for (const QJsonValue& value : targets)
+    {
+        const QJsonObject target = value.toObject();
+
+        bool ok = false;
+        const qulonglong handle =
+            target.value("windowHandle").toString().toULongLong(&ok, 16);
+
+        QJsonObject result = ok
+            ? controller.setMicrophoneMuted(
+                  static_cast<quintptr>(handle),
+                  target.value("tabRuntimeId").toString(),
+                  target.value("tabName").toString(),
+                  true)
+            : QJsonObject{{"ok", false}, {"error", "The Chrome window handle is invalid."}};
+
+        result.insert("requestKey", target.value("requestKey"));
+        result.insert("requestedMuted", true);
+        results.append(result);
+    }
+
+    emit muteAllFinished(results);
 }
 
 void UiaWorker::shutdown()

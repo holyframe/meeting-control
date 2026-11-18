@@ -25,6 +25,12 @@ add_executable(MeetingController WIN32
     src/ChromeWindowEnumerator.cpp
     src/UiaTreeInspector.h
     src/UiaTreeInspector.cpp
+    src/ActiveTabPicker.h
+    src/ActiveTabPicker.cpp
+    src/UiaSupport.h
+    src/UiaSupport.cpp
+    src/ZoomMeetingController.h
+    src/ZoomMeetingController.cpp
 )
 
 target_include_directories(MeetingController PRIVATE src)

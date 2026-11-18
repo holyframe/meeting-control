@@ -36,15 +36,23 @@ The meeting list starts empty. The app does not display fabricated meetings or p
 
 ## Important: current build is read-only
 
-The dashboard includes the intended controls, but the following features are **not implemented yet**:
+**Pick Up Meeting Tabs** lists every Chrome tab through UI Automation and lets you check one or more tabs to import. It does not import the active tab on its own. Chrome exposes a page address only for the tab currently shown in each window; other tabs are listed by title. When an address can be read and it is a Zoom web-client meeting (`/wc/<meeting id>` on `zoom.us`, `zoom.com`, or `zoomgov.com`), the meeting ID is stored. Only the host and meeting ID are kept; the full URL is not stored or logged because it can contain the passcode. Managed meetings are kept in memory only.
 
-- Picking up/registering the active Chrome tab as a Zoom meeting.
-- Building and persisting managed meeting cards from actual Zoom tabs.
-- Activating a selected meeting.
-- Muting or unmuting Zoom.
-- Mute All / Release Active Meeting behavior.
+Each managed meeting card offers:
 
-The Pick Up Active Meeting Tab button explains this limitation when selected. Mute controls remain disabled. This is deliberate: the application must not claim a meeting is muted or unmuted unless it can read and verify the real Zoom state.
+- **Set Active** — selects that tab in its Chrome window and brings the window to the front.
+- **Read Mic** — selects the tab and reads Zoom's microphone control, showing Muted, Unmuted, or Audio not joined.
+- **Mute / Unmute** — reads the control, acts only when the current state differs, then re-reads the control until Zoom reports the new state.
+- **⋯** — refresh the microphone state or remove the meeting from the list.
+
+**Mute All Meetings** applies the same read-act-verify sequence to every managed meeting in turn. **Release Active Meeting** only clears the active marker in this app; it does not change Zoom.
+
+A card never shows a microphone state that was not read back from Zoom. If a change cannot be verified, the state is reset to unread and the failure is reported.
+
+The following features are **not implemented yet**:
+
+- Persisting managed meetings across restarts.
+- Watching for microphone changes made in Zoom itself; states refresh only when this app reads them.
 
 ## UI Automation validation gate
 
@@ -73,9 +81,10 @@ Open **Developer PowerShell for Visual Studio 2022** and run:
 ```powershell
 cmake -S . -B build -DCMAKE_PREFIX_PATH="C:\Qt\6.8.3\msvc2022_64"
 cmake --build build --config Release
+& "C:\Qt\6.8.3\msvc2022_64\bin\windeployqt.exe" --release .\build\Release\MeetingController.exe
 ```
 
-Change the Qt path to the location and version installed on your machine. The build uses the MSVC 2022 64-bit Qt kit.
+`build.ps1` runs these three steps. Change the Qt path to the location and version installed on your machine. The build uses the MSVC 2022 64-bit Qt kit. `windeployqt` copies `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, and the Windows platform plugin next to the executable so it can be launched directly.
 
 Run the application:
 
@@ -87,14 +96,13 @@ Run the application:
 
 1. Open Chrome normally using your existing profile.
 2. Join one Zoom meeting in Chrome.
-3. Start Meeting Controller.
-4. Wait for the UIA status in the lower-left sidebar to show **UIA Ready**.
-5. Click **Live Diagnostics** in the left sidebar.
-6. Click **Refresh** to enumerate visible Chrome windows.
-7. Select the Chrome window containing the Zoom meeting.
-8. Click **Inspect Selected Window**.
-9. Review the **Accessibility Tree** tab.
-10. Look for `TabItem`, `Document`, and button nodes related to Zoom audio/microphone controls.
+3. Start Meeting Controller. Nothing is scanned or initialized at startup.
+4. Click **Live Diagnostics** in the left sidebar.
+5. Click **Refresh** to enumerate visible Chrome windows.
+6. Select the Chrome window containing the Zoom meeting.
+7. Click **Inspect Selected Window**. Windows UI Automation is initialized on the first inspection, and the sidebar status changes to **UIA Ready**.
+8. Review the **Accessibility Tree** tab.
+9. Look for `TabItem`, `Document`, and button nodes related to Zoom audio/microphone controls.
 
 The selector lists Chrome windows, not individual tabs. The app does not yet select or register a tab.
 
@@ -115,7 +123,10 @@ Redact meeting titles, participant names, and other private details before shari
 - UIA control patterns vary by element. A visible button may expose `InvokePattern`, `LegacyIAccessiblePattern`, or no actionable pattern.
 - The accessibility tree can change with Chrome and Zoom updates.
 - UIA cannot bypass Zoom's server-side simultaneous-meeting restrictions.
-- This build discovers top-level Chrome windows only; it does not yet pick up individual tabs or control microphones.
+- Background Chrome tabs are listed by title. Their page address is available only for the tab currently shown in that window.
+- Chrome renders only the selected tab of each window, so a meeting tab is selected before its microphone is read or changed. Controlling several meetings therefore switches tabs in Chrome.
+- The microphone control is identified by its accessible name (`Mute`, `Unmute`, or a name mentioning the microphone). A Zoom redesign that renames the control would break detection, which is reported as "no microphone control was found" rather than guessed at.
+- Meetings that have not joined audio expose a Join Audio control instead; these are reported and left unchanged.
 
 ## Source layout
 
@@ -123,6 +134,9 @@ Redact meeting titles, participant names, and other private details before shari
 - `src/ChromeWindowEnumerator.*` — Win32 enumeration of visible Chrome top-level windows.
 - `src/UiaWorker.*` — COM/UIA worker thread and initialization.
 - `src/UiaTreeInspector.*` — bounded Control View tree inspection and JSON serialization.
+- `src/ActiveTabPicker.*` — lists Chrome tabs for import.
+- `src/ZoomMeetingController.*` — tab activation and read/act/verify microphone control.
+- `src/UiaSupport.*` — shared UIA property reads and Chrome browser-UI scanning.
 - `src/main.cpp` — Qt application entry point.
 
 ## References

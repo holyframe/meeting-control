@@ -14,18 +14,19 @@
 - [x] Timestamped diagnostics log
 - [x] Dedicated COM/UIA worker thread
 - [x] Read-only safety posture
+- [x] List every Chrome tab and import the ones the user selects
+- [x] Read a Zoom meeting ID when the shown tab's address is available
+- [x] Add/remove managed meeting records (in memory)
+- [x] Activate a managed meeting
+- [x] Discover Zoom microphone control and state
+- [x] Mute/unmute with post-action verification
+- [x] Mute All / release-active coordination
 
 ## Not implemented yet
 
-- [ ] Read the currently selected Chrome `TabItem`
-- [ ] Validate the selected tab is a Zoom meeting
-- [ ] Add/remove managed meeting records
-- [ ] Persist meeting identity across refreshes
-- [ ] Activate a managed meeting
-- [ ] Discover Zoom microphone control and state
-- [ ] Mute/unmute with post-action verification
-- [ ] Mute All / release-active coordination
+- [ ] Persist meeting identity across restarts
+- [ ] Observe microphone changes made inside Zoom
 
 ## Next milestone
 
-Use the Live Diagnostics page to inspect a real Zoom meeting tab. Confirm how the active Chrome `TabItem` and Zoom page controls are represented by UIA before implementing active-tab pickup.
+Confirm microphone detection against a real Zoom meeting. If a meeting reports that no microphone control was found, inspect that Chrome window on the Live Diagnostics page and compare the accessible names of the Zoom toolbar buttons with the names this build looks for.

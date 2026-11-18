@@ -1036,7 +1036,7 @@ void MainWindow::onImportedMeetingsPrepared(const QJsonArray& results)
     if (!failures.isEmpty())
     {
         QMessageBox::warning(
-            this,
+        this,
             "Some meetings could not be read",
             failures.join("\n\n"));
     }

@@ -179,7 +179,7 @@ void UiaWorker::readAudioConnection(
 {
     initialize();
     QJsonObject result = automation_
-        ? ZoomMeetingController(automation_.Get())
+        ? ZoomMeetingController(automation_.Get(), [this](const QString& message) { emit diagnostic(message); })
               .readAudioConnection(hwndValue, tabRuntimeId, tabName)
         : QJsonObject{{"ok", false}, {"error", "UI Automation could not be initialized."}};
     result.insert("requestKey", requestKey);
@@ -192,7 +192,7 @@ void UiaWorker::setAudioConnected(
 {
     initialize();
     QJsonObject result = automation_
-        ? ZoomMeetingController(automation_.Get())
+        ? ZoomMeetingController(automation_.Get(), [this](const QString& message) { emit diagnostic(message); })
               .setAudioConnected(hwndValue, tabRuntimeId, tabName, connected)
         : QJsonObject{{"ok", false}, {"error", "UI Automation could not be initialized."}};
     result.insert("requestKey", requestKey);

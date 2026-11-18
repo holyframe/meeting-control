@@ -9,7 +9,7 @@
 namespace zoomAudio
 {
 enum class Connection { Unknown, Connected, Disconnected };
-enum class Action { None, OpenMenu, JoinAudio, JoinComputerAudio, LeaveAudio };
+enum class Action { None, OpenMenu, JoinAudio, JoinComputerAudio, LeaveAudio, SelectComputerAudio };
 
 struct Observation
 {
@@ -21,6 +21,14 @@ struct Observation
     bool joinAvailable = false;
     bool joinComputerAvailable = false;
     bool leaveAvailable = false;
+    bool computerAudioTabAvailable = false;
+    bool computerAudioTabSelected = false;
+    bool computerAudioPanelVisible = false;
+
+    bool chooserOpen() const
+    {
+        return joinComputerAvailable || computerAudioTabAvailable || computerAudioPanelVisible;
+    }
 };
 
 Action actionForName(const QString& name);

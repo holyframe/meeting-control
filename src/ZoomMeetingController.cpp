@@ -4,9 +4,13 @@
 #include "ZoomAudioState.h"
 
 #include <QThread>
+#include <QElapsedTimer>
+#include <QJsonArray>
 
 #include <OleAuto.h>
-#include <deque>
+#include <algorithm>
+#include <numeric>
+#include <utility>
 
 using Microsoft::WRL::ComPtr;
 
@@ -17,6 +21,7 @@ namespace
 constexpr int kVerifyAttempts = 15;
 constexpr int kVerifyIntervalMs = 200;
 constexpr int kSelectSettleMs = 250;
+constexpr int kAudioVerifyAttempts = 50;
 
 QJsonObject failure(const QString& error)
 {
@@ -115,14 +120,134 @@ bool isVisibleEnabled(IUIAutomationElement* element)
         && SUCCEEDED(element->get_CurrentIsEnabled(&enabled)) && enabled;
 }
 
-bool isAudioControlType(CONTROLTYPEID type)
+bool sameElement(IUIAutomation* automation, IUIAutomationElement* a, IUIAutomationElement* b)
 {
-    return type == UIA_ButtonControlTypeId || type == UIA_MenuItemControlTypeId
-        || type == UIA_SplitButtonControlTypeId;
+    BOOL same = FALSE;
+    return a && b && SUCCEEDED(automation->CompareElements(a, b, &same)) && same;
+}
+
+bool withinElement(IUIAutomation* automation, IUIAutomationElement* child, IUIAutomationElement* parent)
+{
+    ComPtr<IUIAutomationTreeWalker> walker;
+    if (!child || !parent || FAILED(automation->get_RawViewWalker(walker.GetAddressOf())) || !walker)
+        return false;
+    ComPtr<IUIAutomationElement> node = child;
+    for (int depth = 0; node && depth < 96; ++depth)
+    {
+        if (sameElement(automation, node.Get(), parent))
+            return true;
+        ComPtr<IUIAutomationElement> next;
+        if (FAILED(walker->GetParentElement(node.Get(), next.GetAddressOf())))
+            break;
+        node = std::move(next);
+    }
+    return false;
+}
+
+// Resolve the control at its current on-screen position. Chromium sometimes
+// returns the button's text child from hit-testing, so accept its descendants.
+std::optional<POINT> verifiedPoint(IUIAutomation* automation, HWND hwnd, IUIAutomationElement* element)
+{
+    RECT bounds{};
+    if (GetForegroundWindow() != hwnd || FAILED(element->get_CurrentBoundingRectangle(&bounds))
+        || IsRectEmpty(&bounds))
+        return {};
+    POINT point{};
+    BOOL clickable = FALSE;
+    if (FAILED(element->GetClickablePoint(&point, &clickable)) || !clickable || !PtInRect(&bounds, point))
+        point = {std::midpoint(bounds.left, bounds.right), std::midpoint(bounds.top, bounds.bottom)};
+    if (GetAncestor(WindowFromPhysicalPoint(point), GA_ROOT) != hwnd)
+        return {};
+    ComPtr<IUIAutomationElement> hit;
+    if (FAILED(automation->ElementFromPoint(point, hit.GetAddressOf()))
+        || !withinElement(automation, hit.Get(), element))
+        return {};
+    return point;
+}
+
+// A hosted renderer can answer hit tests while a search starting at Chrome's
+// window still returns only the toolbar. Bind to the content underneath the
+// middle of the meeting to query that fragment. This point is never clicked.
+ComPtr<IUIAutomationElement> foregroundFragment(IUIAutomation* automation, HWND hwnd,
+    IUIAutomationElement* document)
+{
+    RECT page{}, window{}, visible{};
+    if (GetForegroundWindow() != hwnd || FAILED(document->get_CurrentBoundingRectangle(&page))
+        || !GetWindowRect(hwnd, &window) || !IntersectRect(&visible, &page, &window))
+        return {};
+    const POINT middle{std::midpoint(visible.left, visible.right), std::midpoint(visible.top, visible.bottom)};
+    const HWND content = WindowFromPhysicalPoint(middle);
+    if (GetAncestor(content, GA_ROOT) != hwnd)
+        return {};
+    ComPtr<IUIAutomationElement> node;
+    ComPtr<IUIAutomationTreeWalker> walker;
+    if (SUCCEEDED(automation->ElementFromPoint(middle, node.GetAddressOf()))
+        && SUCCEEDED(automation->get_RawViewWalker(walker.GetAddressOf())) && walker)
+    {
+        for (int depth = 0; node && depth < 64; ++depth)
+        {
+            if (sameElement(automation, node.Get(), document))
+                break;
+            CONTROLTYPEID type = 0;
+            node->get_CurrentControlType(&type);
+            const QString role = uia::readStringProperty(node.Get(), UIA_AriaRolePropertyId);
+            if (type == UIA_DocumentControlTypeId || role == "tabpanel" || role == "dialog"
+                || uia::readStringProperty(node.Get(), UIA_AutomationIdPropertyId) == "voip-tab"
+                || ((type == UIA_ButtonControlTypeId || role == "button") && zoomAudio::actionForName(
+                    uia::readStringProperty(node.Get(), UIA_NamePropertyId)) == zoomAudio::Action::JoinComputerAudio))
+                return node;
+            ComPtr<IUIAutomationElement> parent;
+            walker->GetParentElement(node.Get(), parent.GetAddressOf());
+            node = std::move(parent);
+        }
+    }
+    ComPtr<IUIAutomationElement> renderer;
+    if (content != hwnd)
+        automation->ElementFromHandle(content, renderer.GetAddressOf());
+    return renderer;
+}
+
+bool clickJoinButton(POINT point)
+{
+    const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (point.x < left || point.x >= left + width || point.y < top || point.y >= top + height)
+        return false;
+    // Aim at the middle of a physical pixel, including on monitors to the
+    // left of the primary display. Submit movement and click as one batch.
+    INPUT events[3]{};
+    for (INPUT& event : events)
+        event.type = INPUT_MOUSE;
+    events[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    events[0].mi.dx = static_cast<LONG>(((point.x - left) * 65536LL + 32768) / width);
+    events[0].mi.dy = static_cast<LONG>(((point.y - top) * 65536LL + 32768) / height);
+    events[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    events[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    const UINT sent = SendInput(3, events, sizeof(INPUT));
+    if (sent == 2) // Release a button if Windows accepted only part of the batch.
+        return SendInput(1, &events[2], sizeof(INPUT)) == 1;
+    return sent == 3;
+}
+
+QString audioActionName(zoomAudio::Action action)
+{
+    switch (action)
+    {
+    case zoomAudio::Action::OpenMenu: return "open audio menu";
+    case zoomAudio::Action::JoinAudio: return "open join-audio chooser";
+    case zoomAudio::Action::JoinComputerAudio: return "join computer audio";
+    case zoomAudio::Action::SelectComputerAudio: return "select Computer Audio tab";
+    case zoomAudio::Action::LeaveAudio: return "leave computer audio";
+    default: return "none";
+    }
 }
 }
 
-ZoomMeetingController::ZoomMeetingController(IUIAutomation* automation)
+ZoomMeetingController::ZoomMeetingController(IUIAutomation* automation,
+    std::function<void(const QString&)> diagnostic)
+    : diagnostic_(std::move(diagnostic))
 {
     automation_ = automation;
 }
@@ -172,7 +297,8 @@ ComPtr<IUIAutomationElement> ZoomMeetingController::findTab(
     return titleMatch;
 }
 
-ComPtr<IUIAutomationElement> ZoomMeetingController::findLiveDocument(HWND hwnd) const
+ComPtr<IUIAutomationElement> ZoomMeetingController::findLiveDocument(HWND hwnd,
+    const QString& selectedTabName) const
 {
     ComPtr<IUIAutomationElement> root = rootOf(hwnd);
     if (!root)
@@ -184,13 +310,27 @@ ComPtr<IUIAutomationElement> ZoomMeetingController::findLiveDocument(HWND hwnd) 
 
     const uia::BrowserUi ui = uia::scanBrowserUi(walker.Get(), root.Get());
 
+    ComPtr<IUIAutomationElement> first;
+    ComPtr<IUIAutomationElement> named;
+    int visibleCount = 0;
+    int namedCount = 0;
     for (const auto& document : ui.documents)
     {
-        if (!uia::readBooleanProperty(document.Get(), UIA_IsOffscreenPropertyId))
+        if (uia::readBooleanProperty(document.Get(), UIA_IsOffscreenPropertyId))
+            continue;
+        if (selectedTabName.isEmpty())
             return document;
+        ++visibleCount;
+        if (!first)
+            first = document;
+        if (uia::readStringProperty(document.Get(), UIA_NamePropertyId) == selectedTabName)
+        {
+            named = document;
+            ++namedCount;
+        }
     }
-
-    return {};
+    // A split Chrome window can expose two meetings at once.
+    return visibleCount == 1 ? first : namedCount == 1 ? named : nullptr;
 }
 
 ComPtr<IUIAutomationElement> ZoomMeetingController::findMicrophoneButton(
@@ -293,7 +433,7 @@ QJsonObject ZoomMeetingController::activateTab(
         tab.Get(), UIA_SelectionItemIsSelectedPropertyId);
 
     ComPtr<IUIAutomationSelectionItemPattern> selection;
-    if (SUCCEEDED(tab->GetCurrentPatternAs(
+    if (!selected && SUCCEEDED(tab->GetCurrentPatternAs(
             UIA_SelectionItemPatternId, IID_PPV_ARGS(selection.GetAddressOf())))
         && selection)
     {
@@ -354,102 +494,133 @@ QJsonObject ZoomMeetingController::activateAndReadMicrophone(
 }
 
 std::vector<ZoomMeetingController::Control> ZoomMeetingController::collectControls(
-    IUIAutomationElement* root) const
+    IUIAutomationElement* root, HWND hwnd, IUIAutomationElement* popupDocument) const
 {
     std::vector<Control> controls;
     if (!automation_ || !root)
         return controls;
 
     ComPtr<IUIAutomationCondition> condition;
-    for (const CONTROLTYPEID type : {UIA_ButtonControlTypeId, UIA_MenuItemControlTypeId,
-                                     UIA_SplitButtonControlTypeId})
+    const auto include = [&](PROPERTYID property, const VARIANT& value)
     {
-        VARIANT value;
-        VariantInit(&value);
-        value.vt = VT_I4;
-        value.lVal = type;
-        ComPtr<IUIAutomationCondition> typeCondition;
-        if (FAILED(automation_->CreatePropertyCondition(
-                UIA_ControlTypePropertyId, value, typeCondition.GetAddressOf())))
-            return {};
+        ComPtr<IUIAutomationCondition> term;
+        if (FAILED(automation_->CreatePropertyCondition(property, value, term.GetAddressOf())))
+            return false;
         if (!condition)
-            condition = typeCondition;
+            condition = std::move(term);
         else
         {
             ComPtr<IUIAutomationCondition> combined;
-            if (FAILED(automation_->CreateOrCondition(
-                    condition.Get(), typeCondition.Get(), combined.GetAddressOf())))
-                return {};
-            condition = combined;
+            if (FAILED(automation_->CreateOrCondition(condition.Get(), term.Get(), combined.GetAddressOf())))
+                return false;
+            condition = std::move(combined);
         }
+        return true;
+    };
+    const auto includeText = [&](PROPERTYID property, const wchar_t* text)
+    {
+        VARIANT value{};
+        value.vt = VT_BSTR;
+        value.bstrVal = SysAllocString(text);
+        const bool ok = value.bstrVal && include(property, value);
+        VariantClear(&value);
+        return ok;
+    };
+    for (const CONTROLTYPEID type : {UIA_ButtonControlTypeId, UIA_MenuItemControlTypeId,
+                                     UIA_SplitButtonControlTypeId, UIA_TabItemControlTypeId})
+    {
+        VARIANT value{};
+        value.vt = VT_I4;
+        value.lVal = type;
+        if (!include(UIA_ControlTypePropertyId, value))
+            return controls;
     }
+    if (!includeText(UIA_AriaRolePropertyId, L"button") || !includeText(UIA_AriaRolePropertyId, L"tab")
+        || !includeText(UIA_AutomationIdPropertyId, L"voip-tab"))
+        return controls;
+
+    // Search the raw view in one provider call. The Zoom chooser can sit
+    // under an ordinary group with no dialog or Document role.
+    ComPtr<IUIAutomationCacheRequest> cache;
+    ComPtr<IUIAutomationCondition> raw;
+    if (FAILED(automation_->CreateCacheRequest(cache.GetAddressOf())) || !cache
+        || FAILED(automation_->get_RawViewCondition(raw.GetAddressOf()))
+        || FAILED(cache->put_TreeFilter(raw.Get())))
+        return controls;
+    cache->put_TreeScope(TreeScope_Element);
+    for (const PROPERTYID property : {UIA_NamePropertyId, UIA_ControlTypePropertyId,
+            UIA_IsOffscreenPropertyId, UIA_IsEnabledPropertyId, UIA_AutomationIdPropertyId,
+            UIA_AriaRolePropertyId, UIA_SelectionItemIsSelectedPropertyId})
+        cache->AddProperty(property);
 
     ComPtr<IUIAutomationElementArray> elements;
-    if (FAILED(root->FindAll(TreeScope_Descendants, condition.Get(), elements.GetAddressOf()))
-        || !elements)
+    if (FAILED(root->FindAllBuildCache(TreeScope_Subtree, condition.Get(), cache.Get(),
+                                       elements.GetAddressOf())) || !elements)
         return controls;
 
     int count = 0;
     elements->get_Length(&count);
-    for (int index = 0; index < count && index < 2000; ++index)
+    for (int index = 0; index < count; ++index)
     {
         ComPtr<IUIAutomationElement> element;
-        if (SUCCEEDED(elements->GetElement(index, element.GetAddressOf()))
-            && isVisibleEnabled(element.Get()))
+        if (FAILED(elements->GetElement(index, element.GetAddressOf())) || !element)
+            continue;
+        BOOL enabled = FALSE;
+        if (FAILED(element->get_CachedIsEnabled(&enabled)) || !enabled)
+            continue;
+        const auto cachedText = [&](PROPERTYID property)
         {
-            controls.push_back({element,
-                uia::readStringProperty(element.Get(), UIA_NamePropertyId)});
-        }
-    }
-    return controls;
-}
-
-std::vector<ZoomMeetingController::Control> ZoomMeetingController::collectWindowControls(
-    HWND hwnd) const
-{
-    std::vector<Control> controls;
-    ComPtr<IUIAutomationTreeWalker> walker;
-    const auto root = rootOf(hwnd);
-    if (!root || FAILED(automation_->get_ControlViewWalker(walker.GetAddressOf())) || !walker)
-        return controls;
-
-    // Only collect popup controls outside the page. Do not scan other document
-    // subtrees or mistake a browser toolbar button for a Zoom audio control.
-    struct Pending { ComPtr<IUIAutomationElement> element; bool popup; };
-    std::deque<Pending> pending;
-    pending.push_back({root, false});
-    int visited = 0;
-    while (!pending.empty() && visited++ < 1200)
-    {
-        const Pending current = std::move(pending.front());
-        pending.pop_front();
+            VARIANT value{};
+            QString text;
+            if (SUCCEEDED(element->GetCachedPropertyValue(property, &value))
+                && value.vt == VT_BSTR && value.bstrVal)
+                text = QString::fromWCharArray(value.bstrVal, SysStringLen(value.bstrVal));
+            VariantClear(&value);
+            return text;
+        };
         CONTROLTYPEID type = 0;
-        current.element->get_CurrentControlType(&type);
-        if (type == UIA_DocumentControlTypeId)
+        element->get_CachedControlType(&type);
+        const QString name = cachedText(UIA_NamePropertyId);
+        const auto action = zoomAudio::actionForName(name);
+        const QString role = cachedText(UIA_AriaRolePropertyId);
+        if (role == "tab")
+            type = UIA_TabItemControlTypeId;
+        else if (role == "button" && type != UIA_SplitButtonControlTypeId && type != UIA_MenuItemControlTypeId)
+            type = UIA_ButtonControlTypeId;
+        const bool panel = cachedText(UIA_AutomationIdPropertyId) == "voip-tab"
+            && (role == "tabpanel" || name.compare("Computer Audio", Qt::CaseInsensitive) == 0);
+        if (!panel && ((action == zoomAudio::Action::SelectComputerAudio) != (type == UIA_TabItemControlTypeId)
+            || (action == zoomAudio::Action::None && zoomAudio::observe({name}).microphoneState == "unknown")))
             continue;
 
-        const QString role = uia::readStringProperty(current.element.Get(), UIA_AriaRolePropertyId);
-        const bool popup = current.popup || type == UIA_MenuControlTypeId
-            || (current.element != root && type == UIA_WindowControlTypeId)
-            || role == "dialog" || role == "menu";
-        if ((popup || type == UIA_MenuItemControlTypeId) && isAudioControlType(type)
-            && isVisibleEnabled(current.element.Get()))
+        const bool chooserControl = panel || action == zoomAudio::Action::JoinComputerAudio
+            || action == zoomAudio::Action::SelectComputerAudio;
+        BOOL offscreen = TRUE;
+        if (FAILED(element->get_CachedIsOffscreen(&offscreen)) || offscreen)
         {
-            controls.push_back({current.element,
-                uia::readStringProperty(current.element.Get(), UIA_NamePropertyId)});
+            // Accept a misreported chooser control only when the actual
+            // foreground hit-test identifies that same element on screen.
+            if (!chooserControl || !verifiedPoint(automation_.Get(), hwnd, element.Get()))
+                continue;
         }
-
-        ComPtr<IUIAutomationElement> child;
-        walker->GetFirstChildElement(current.element.Get(), child.GetAddressOf());
-        int siblings = 0;
-        while (child && siblings++ < 1200 && pending.size() < 1200)
+        if (popupDocument && !withinElement(automation_.Get(), element.Get(), popupDocument))
         {
-            pending.push_back({child, popup});
-            ComPtr<IUIAutomationElement> next;
-            if (FAILED(walker->GetNextSiblingElement(child.Get(), next.GetAddressOf())))
-                break;
-            child = std::move(next);
+            if (!chooserControl && action != zoomAudio::Action::LeaveAudio)
+                continue;
+            // Detached overlay: the named control must occupy the selected
+            // meeting's content area, including when Chrome is in split view.
+            RECT page{}, item{};
+            if (FAILED(popupDocument->get_CurrentBoundingRectangle(&page))
+                || FAILED(element->get_CurrentBoundingRectangle(&item)) || IsRectEmpty(&item)
+                || !PtInRect(&page, {std::midpoint(item.left, item.right), std::midpoint(item.top, item.bottom)}))
+                continue;
         }
+        VARIANT selected{};
+        const bool isSelected = type == UIA_TabItemControlTypeId
+            && SUCCEEDED(element->GetCachedPropertyValue(UIA_SelectionItemIsSelectedPropertyId, &selected))
+            && selected.vt == VT_BOOL && selected.boolVal == VARIANT_TRUE;
+        VariantClear(&selected);
+        controls.push_back({element, name, type, isSelected, panel});
     }
     return controls;
 }
@@ -458,7 +629,23 @@ QJsonObject ZoomMeetingController::controlAudioConnection(
     quintptr hwndValue, const QString& tabRuntimeId, const QString& tabName,
     std::optional<bool> connected) const
 {
-    const QJsonObject activation = activateTab(hwndValue, tabRuntimeId, tabName, false);
+    QElapsedTimer timer;
+    timer.start();
+    QJsonArray diagnostics;
+    const auto report = [&](const QString& message)
+    {
+        const QString line = QString("Audio +%1 ms: %2").arg(timer.elapsed()).arg(message);
+        if (diagnostics.size() < 80)
+            diagnostics.append(line);
+        if (diagnostic_)
+            diagnostic_(line);
+    };
+    report(connected.has_value() ? (*connected ? "Sound On requested" : "Sound Off requested")
+                                : "Reading audio connection");
+    // Zoom's join chooser and browser audio activation must be on screen when
+    // reconnecting, rather than acting behind the controller/minimized Chrome.
+    const QJsonObject activation = activateTab(hwndValue, tabRuntimeId, tabName,
+                                               connected.value_or(false));
     if (!activation.value("ok").toBool())
         return activation;
 
@@ -466,22 +653,41 @@ QJsonObject ZoomMeetingController::controlAudioConnection(
     const QString selectedId = activation.value("tabRuntimeId").toString();
     QString contextError;
     bool targetLost = false;
-    bool searchPopups = false;
+    // Discover an already-open chooser before clicking Join Audio; that
+    // toolbar button can otherwise just reopen/toggle the same dialog.
+    bool searchPopups = connected.value_or(false);
     bool openedMenu = false;
     QString menuRuntimeId;
     QString menuName;
+    const auto windowRoot = rootOf(hwnd);
+    const auto selectedTab = windowRoot ? findTab(windowRoot, selectedId, QString()) : nullptr;
+    const QString selectedName = activation.value("tabName").toString();
+    ComPtr<IUIAutomationElement> document;
+    QString lastObservation;
 
     const auto targetSelected = [&]
     {
         if (targetLost)
             return false;
-        const auto root = rootOf(hwnd);
-        const auto tab = root ? findTab(root, selectedId, QString()) : nullptr;
-        if (!tab || !uia::readBooleanProperty(tab.Get(), UIA_SelectionItemIsSelectedPropertyId))
+        if (!IsWindow(hwnd) || !selectedTab
+            || !uia::readBooleanProperty(selectedTab.Get(), UIA_SelectionItemIsSelectedPropertyId))
         {
             targetLost = true;
             contextError = "The meeting tab closed or is no longer selected. "
                            "The sound result is unverified; check the meeting in Chrome.";
+            return false;
+        }
+        return true;
+    };
+    const auto targetInWindow = [&]
+    {
+        if (!targetSelected())
+            return false;
+        const auto root = rootOf(hwnd);
+        if (!root || !findTab(root, selectedId, QString()))
+        {
+            targetLost = true;
+            contextError = "The meeting tab moved or closed. The sound result is unverified.";
             return false;
         }
         return true;
@@ -491,29 +697,99 @@ QJsonObject ZoomMeetingController::controlAudioConnection(
         std::vector<Control> controls;
         if (!targetSelected())
             return controls;
-        const auto document = findLiveDocument(hwnd);
-        if (document)
-            controls = collectControls(document.Get());
-        if (searchPopups)
+        if (!document)
+            document = findLiveDocument(hwnd, selectedName);
+        if (!document)
+            return controls;
+        controls = collectControls(document.Get(), hwnd);
+        const auto appendFragment = [&](IUIAutomationElement* fragment)
         {
-            auto popupControls = collectWindowControls(hwnd);
-            controls.insert(controls.end(), popupControls.begin(), popupControls.end());
+            auto popupControls = collectControls(fragment, hwnd, document.Get());
+            for (const Control& candidate : popupControls)
+            {
+                const bool duplicate = std::any_of(controls.cbegin(), controls.cend(),
+                    [&](const Control& existing)
+                    {
+                        return existing.name == candidate.name && existing.type == candidate.type
+                            && sameElement(automation_.Get(), existing.element.Get(), candidate.element.Get());
+                    });
+                if (!duplicate)
+                    controls.push_back(candidate);
+            }
+        };
+        if (searchPopups && windowRoot)
+            appendFragment(windowRoot.Get());
+        if (connected.value_or(false))
+        {
+            bool chooserExpected = false;
+            bool joinFound = false;
+            for (const Control& control : controls)
+            {
+                const auto action = zoomAudio::actionForName(control.name);
+                chooserExpected |= control.computerAudioPanel || action == zoomAudio::Action::SelectComputerAudio
+                    || action == zoomAudio::Action::JoinAudio;
+                joinFound |= action == zoomAudio::Action::JoinComputerAudio;
+            }
+            if (chooserExpected && !joinFound)
+            {
+                const auto fragment = foregroundFragment(automation_.Get(), hwnd, document.Get());
+                if (fragment && !sameElement(automation_.Get(), fragment.Get(), windowRoot.Get()))
+                    appendFragment(fragment.Get());
+            }
         }
+        if (controls.empty())
+            document.Reset();
         if (!targetSelected())
             return std::vector<Control>();
         return controls;
+    };
+    const auto observeControls = [&](const std::vector<Control>& controls)
+    {
+        QStringList names;
+        QStringList audioNames;
+        bool panelVisible = false;
+        for (const Control& control : controls)
+        {
+            if (control.computerAudioPanel)
+            {
+                panelVisible = true;
+                audioNames.append("Computer Audio panel");
+                continue;
+            }
+            names.append(control.name);
+            if (zoomAudio::actionForName(control.name) != zoomAudio::Action::None
+                || zoomAudio::observe({control.name}).microphoneState != "unknown")
+                audioNames.append(control.name);
+        }
+        auto observation = zoomAudio::observe(names);
+        observation.computerAudioPanelVisible = panelVisible;
+        for (const Control& control : controls)
+        {
+            if (control.type == UIA_TabItemControlTypeId && control.selected
+                && zoomAudio::actionForName(control.name) == zoomAudio::Action::SelectComputerAudio)
+                observation.computerAudioTabSelected = true;
+        }
+        const QString summary = QString("Read %1; microphone %2; controls [%3]; computer tab %4")
+            .arg(zoomAudio::connectionName(observation.connection), observation.microphoneState,
+                 audioNames.join(" | "), observation.computerAudioTabSelected ? "selected" : "not selected");
+        if (summary != lastObservation)
+        {
+            report(summary);
+            lastObservation = summary;
+        }
+        return observation;
     };
     const auto uniqueControl = [&](const std::vector<Control>& controls, zoomAudio::Action action)
     {
         ComPtr<IUIAutomationElement> match;
         for (const Control& control : controls)
         {
-            if (zoomAudio::actionForName(control.name) != action)
+            if (control.computerAudioPanel || zoomAudio::actionForName(control.name) != action)
                 continue;
-            CONTROLTYPEID type = 0;
-            control.element->get_CurrentControlType(&type);
-            if (action == zoomAudio::Action::OpenMenu && type == UIA_MenuItemControlTypeId)
+            if (action == zoomAudio::Action::OpenMenu && control.type == UIA_MenuItemControlTypeId)
                 continue; // Audio Settings inside the menu is not its opener.
+            if (action == zoomAudio::Action::SelectComputerAudio && control.type != UIA_TabItemControlTypeId)
+                continue;
             if (match)
             {
                 contextError = "More than one Zoom audio control matched. "
@@ -528,18 +804,18 @@ QJsonObject ZoomMeetingController::controlAudioConnection(
     const zoomAudio::Backend backend{
         [&]
         {
-            QStringList names;
-            for (const Control& control : readControls())
-                names.append(control.name);
-            return zoomAudio::observe(names);
+            return observeControls(readControls());
         },
         [&](zoomAudio::Action action)
         {
+            report("Preparing to " + audioActionName(action));
             const auto controls = readControls();
-            QStringList names;
-            for (const Control& control : controls)
-                names.append(control.name);
-            const auto observation = zoomAudio::observe(names);
+            const auto observation = observeControls(controls);
+            if (action == zoomAudio::Action::JoinAudio && observation.chooserOpen())
+            {
+                report("The chooser appeared before the toolbar action. Using the open chooser.");
+                return true;
+            }
             // State may have changed since the previous read. Never activate a
             // connection control on contradictory or newly unknown evidence.
             if ((action == zoomAudio::Action::LeaveAudio
@@ -550,10 +826,28 @@ QJsonObject ZoomMeetingController::controlAudioConnection(
                 return false;
 
             const auto element = uniqueControl(controls, action);
-            if (!element || !targetSelected())
+            if (!element || !targetInWindow())
+            {
+                report("Could not identify an actionable control to " + audioActionName(action));
+                return false;
+            }
+            const bool joining = action == zoomAudio::Action::JoinComputerAudio;
+            if (!uia::readBooleanProperty(element.Get(), UIA_IsEnabledPropertyId))
+                return false;
+            if (!joining && !isVisibleEnabled(element.Get()) && !(action == zoomAudio::Action::SelectComputerAudio
+                && verifiedPoint(automation_.Get(), hwnd, element.Get())))
                 return false;
             bool invoked = false;
-            if (action == zoomAudio::Action::OpenMenu)
+            if (action == zoomAudio::Action::SelectComputerAudio)
+            {
+                if (uia::readBooleanProperty(element.Get(), UIA_SelectionItemIsSelectedPropertyId))
+                    return true;
+                ComPtr<IUIAutomationSelectionItemPattern> selection;
+                invoked = SUCCEEDED(element->GetCurrentPatternAs(
+                    UIA_SelectionItemPatternId, IID_PPV_ARGS(selection.GetAddressOf())))
+                    && selection && SUCCEEDED(selection->Select());
+            }
+            else if (action == zoomAudio::Action::OpenMenu)
             {
                 ComPtr<IUIAutomationExpandCollapsePattern> expand;
                 if (SUCCEEDED(element->GetCurrentPatternAs(
@@ -578,21 +872,46 @@ QJsonObject ZoomMeetingController::controlAudioConnection(
                     menuName = uia::readStringProperty(element.Get(), UIA_NamePropertyId);
                 }
             }
+            else if (joining)
+            {
+                if (!targetSelected() || zoomAudio::actionForName(uia::readStringProperty(
+                        element.Get(), UIA_NamePropertyId)) != zoomAudio::Action::JoinComputerAudio)
+                    return false;
+                const auto point = verifiedPoint(automation_.Get(), hwnd, element.Get());
+                if (point)
+                {
+                    if (!targetSelected() || GetForegroundWindow() != hwnd
+                        || GetAncestor(WindowFromPhysicalPoint(*point), GA_ROOT) != hwnd
+                        || (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000))
+                        return false;
+                    report("Clicking the verified Join Audio by Computer button in Chrome");
+                    invoked = clickJoinButton(*point);
+                }
+                else if (isVisibleEnabled(element.Get()) && targetSelected())
+                {
+                    report("Using the join button's accessible action (no confirmed foreground click point)");
+                    invoked = invokeElement(element.Get());
+                }
+            }
             else
                 invoked = invokeElement(element.Get());
             searchPopups = searchPopups || invoked;
+            if (invoked)
+                document.Reset();
+            report(QString("%1: %2").arg(audioActionName(action), invoked ? "action returned success" : "action failed"));
             return invoked;
         },
         [] { QThread::msleep(kVerifyIntervalMs); }
     };
 
+    report("Reading the current Zoom audio controls");
     const zoomAudio::Result outcome = connected.has_value()
-        ? zoomAudio::setConnected(backend, *connected, kVerifyAttempts)
+        ? zoomAudio::setConnected(backend, *connected, kAudioVerifyAttempts)
         : zoomAudio::readConnection(backend, kVerifyAttempts);
 
     // Close a menu opened for discovery if it is still present. Never dismiss a
     // join dialog or issue a blind Escape/click on an unrelated page.
-    if (openedMenu && targetSelected())
+    if (openedMenu && targetInWindow())
     {
         const auto controls = readControls();
         bool leaveMenuVisible = false;
@@ -625,7 +944,7 @@ QJsonObject ZoomMeetingController::controlAudioConnection(
                 }
             }
         }
-        if (opener && targetSelected())
+        if (opener && targetInWindow())
         {
             ComPtr<IUIAutomationExpandCollapsePattern> expand;
             if (SUCCEEDED(opener->GetCurrentPatternAs(
@@ -641,7 +960,8 @@ QJsonObject ZoomMeetingController::controlAudioConnection(
         }
     }
 
-    const bool ok = outcome.ok && targetSelected() && contextError.isEmpty();
+    const bool ok = outcome.ok && targetInWindow() && contextError.isEmpty();
+    report(ok ? "Audio state verified" : "Audio state unverified");
     QJsonObject result{
         {"ok", ok}, {"verified", ok}, {"changed", ok && outcome.changed},
         {"stateChangeAttempted", outcome.actionAttempted},
@@ -649,7 +969,7 @@ QJsonObject ZoomMeetingController::controlAudioConnection(
         {"audioControlName", outcome.observation.controlName},
         {"state", ok ? outcome.observation.microphoneState : "unknown"},
         {"controlName", outcome.observation.microphoneControlName},
-        {"tabRuntimeId", selectedId}
+        {"tabRuntimeId", selectedId}, {"audioDiagnostics", diagnostics}
     };
     if (!ok)
         result.insert("error", contextError.isEmpty() ? outcome.error : contextError);

@@ -5,6 +5,7 @@
 
 #include <vector>
 #include <optional>
+#include <functional>
 
 #include <windows.h>
 #include <objbase.h>
@@ -18,7 +19,8 @@
 class ZoomMeetingController
 {
 public:
-    explicit ZoomMeetingController(IUIAutomation* automation);
+    explicit ZoomMeetingController(IUIAutomation* automation,
+        std::function<void(const QString&)> diagnostic = {});
 
     QJsonObject activateTab(quintptr hwndValue,
                             const QString& tabRuntimeId,
@@ -55,13 +57,15 @@ private:
     {
         Microsoft::WRL::ComPtr<IUIAutomationElement> element;
         QString name;
+        CONTROLTYPEID type = 0;
+        bool selected = false;
+        bool computerAudioPanel = false;
     };
 
-    std::vector<Control> collectControls(IUIAutomationElement* root) const;
-
-    // Zoom renders its menus into the page, but a popup can also land outside
-    // the document, so the window is searched when the page has no match.
-    std::vector<Control> collectWindowControls(HWND hwnd) const;
+    // For a window-wide search, restrict detached chooser/menu controls to
+    // the meeting identified by popupDocument.
+    std::vector<Control> collectControls(IUIAutomationElement* root, HWND hwnd,
+                                         IUIAutomationElement* popupDocument = nullptr) const;
     QJsonObject controlAudioConnection(quintptr hwndValue,
                                        const QString& tabRuntimeId,
                                        const QString& tabName,
@@ -73,7 +77,8 @@ private:
         const QString& tabRuntimeId,
         const QString& tabName) const;
 
-    Microsoft::WRL::ComPtr<IUIAutomationElement> findLiveDocument(HWND hwnd) const;
+    Microsoft::WRL::ComPtr<IUIAutomationElement> findLiveDocument(HWND hwnd,
+        const QString& selectedTabName = {}) const;
 
     Microsoft::WRL::ComPtr<IUIAutomationElement> findMicrophoneButton(
         IUIAutomationElement* document) const;
@@ -81,4 +86,5 @@ private:
     QJsonObject readMicrophoneInWindow(HWND hwnd) const;
 
     Microsoft::WRL::ComPtr<IUIAutomation> automation_;
+    std::function<void(const QString&)> diagnostic_;
 };

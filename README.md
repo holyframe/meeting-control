@@ -43,7 +43,7 @@ Each managed meeting card offers:
 
 - **Mute / Unmute** — shown from the microphone state read at import. It reads the control again, acts only when the current state differs, then re-reads the control until Zoom reports the new state.
 - **Sound Off** — opens Zoom's audio menu if needed, chooses **Leave Computer Audio**, and verifies that Zoom exposes a join-audio control. This disconnects the microphone as well as incoming sound, while leaving the meeting and video running.
-- **Sound On** — chooses **Join Audio**, handles the **Join with Computer Audio** chooser when exposed, and verifies the connection. The microphone is read again after reconnecting; its resulting state follows Zoom's settings.
+- **Sound On** brings the meeting window forward and uses the audio chooser Zoom may have opened when you clicked **Sound Off**. It selects **Computer Audio** if needed, then activates **Join Audio by Computer** once. When Windows identifies the visible button under the pointer target, the controller moves the pointer there and clicks it. The card shows **Sound on** after Zoom exposes **Leave Computer Audio**. If you already rejoined manually, pressing **Sound On** just verifies the connection and refreshes the card.
 - **Read Sound** — shown when the connection state has not been read or could not be verified. Reads the state without joining/leaving audio.
 - **⋯** — refresh the microphone or sound state, or remove the meeting from the list.
 
@@ -51,7 +51,7 @@ Sound refers to Zoom's computer-audio connection, not a separate speaker mute or
 
 **Mute All Meetings** applies the same read-act-verify sequence to every managed meeting in turn. **Release Active Meeting** only clears the active marker in this app; it does not change Zoom.
 
-A card shows the last audio states read back from Zoom. If a sound change cannot be verified, both the sound and microphone states are reset to unread and the failure is reported. The controller stops if its meeting tab is no longer selected. Audio controls must be visible, enabled, and uniquely identified; no coordinates or blind keyboard toggles are used.
+A card shows the last audio states read back from Zoom. If a sound change cannot be verified, both the sound and microphone states are reset to unread and the failure is reported. The controller stops if its meeting tab is no longer selected. A pointer click requires a uniquely identified, enabled join button in the foreground meeting. Windows must confirm that the computed screen point belongs to that button or its text. The controller can also invoke the identified button through its accessibility action.
 
 The following features are **not implemented yet**:
 
@@ -119,6 +119,8 @@ The diagnostics selector lists Chrome windows. Use **Pick Up Meeting Tabs** on t
 4. Use **Refresh sound state** after changing audio directly in Zoom.
 5. Verify a second meeting remains unchanged. Repeatedly requesting an already-established state must not click the join/leave control again.
 6. Hide/unavailable controls, a closed tab, or an unverified operation must produce an unread state and diagnostics rather than assumed success.
+
+Reconnect allows 50 verification reads with a 200 ms wait between reads to accommodate Zoom's audio setup. Live Diagnostics records the controls observed and each join/selection action, including elapsed time. A chooser still visible after a join request is reported as unverified. Control properties are fetched together in a fresh UIA snapshot so polling does not read each property separately across processes.
 
 Automated state-transition and card tests run without accessing Chrome or any real meeting:
 

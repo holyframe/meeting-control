@@ -83,6 +83,37 @@ int matchStrength(const QString& name)
     return 1;
 }
 
+bool namesJoinAudio(const QString& name)
+{
+    const QString text = name.trimmed().toLower();
+    return text.contains("join audio")
+        || text.contains("connect audio")
+        || text.contains("join computer audio")
+        || text.contains("connect to computer audio");
+}
+
+bool namesLeaveAudio(const QString& name)
+{
+    const QString text = name.trimmed().toLower();
+    return text.contains("leave computer audio")
+        || text.contains("leave audio")
+        || text.contains("disconnect computer audio")
+        || text.contains("disconnect audio");
+}
+
+// The chevron beside the microphone button that opens the audio menu.
+bool namesAudioMenu(const QString& name)
+{
+    const QString text = name.trimmed().toLower();
+    if (!text.contains("audio") && !text.contains("mute"))
+        return false;
+
+    return text.contains("option")
+        || text.contains("menu")
+        || text.contains("controls")
+        || text.contains("more");
+}
+
 bool invokeElement(IUIAutomationElement* element)
 {
     ComPtr<IUIAutomationInvokePattern> invoke;
@@ -299,6 +330,24 @@ QJsonObject ZoomMeetingController::activateTab(
         {"tabRuntimeId", uia::readRuntimeId(tab.Get())},
         {"tabName", uia::readStringProperty(tab.Get(), UIA_NamePropertyId)}
     };
+}
+
+QJsonObject ZoomMeetingController::activateAndReadMicrophone(
+    quintptr hwndValue,
+    const QString& tabRuntimeId,
+    const QString& tabName) const
+{
+    const QJsonObject activation =
+        activateTab(hwndValue, tabRuntimeId, tabName, true);
+
+    if (!activation.value("ok").toBool())
+        return activation;
+
+    QJsonObject result = readMicrophoneInWindow(reinterpret_cast<HWND>(hwndValue));
+    result.insert("activated", true);
+    result.insert("tabRuntimeId", activation.value("tabRuntimeId"));
+    result.insert("tabName", activation.value("tabName"));
+    return result;
 }
 
 QJsonObject ZoomMeetingController::readMicrophone(

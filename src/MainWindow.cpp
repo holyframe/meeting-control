@@ -10,11 +10,14 @@
 #include <QDialog>
 #include <QFrame>
 #include <QGridLayout>
+#include <QHash>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
@@ -198,6 +201,10 @@ MainWindow::MainWindow(QWidget* parent)
             worker_, &UiaWorker::muteAll, Qt::QueuedConnection);
     connect(worker_, &UiaWorker::muteAllFinished,
             this, &MainWindow::onMuteAllFinished, Qt::QueuedConnection);
+    connect(this, &MainWindow::prepareImportedMeetingsRequested,
+            worker_, &UiaWorker::prepareImportedMeetings, Qt::QueuedConnection);
+    connect(worker_, &UiaWorker::importedMeetingsPrepared,
+            this, &MainWindow::onImportedMeetingsPrepared, Qt::QueuedConnection);
 
     connect(sidebarMuteAllButton_, &QPushButton::clicked,
             this, &MainWindow::requestMuteAll);
@@ -251,10 +258,12 @@ QWidget* MainWindow::createSidebar()
     auto* brandRow = new QHBoxLayout();
     brandRow->setSpacing(11);
 
-    auto* logo = new QLabel("≋", sidebar);
+    auto* logo = new QLabel(sidebar);
     logo->setObjectName("brandLogo");
     logo->setAlignment(Qt::AlignCenter);
     logo->setFixedSize(48, 48);
+    const qreal logoScale = logo->devicePixelRatioF();
+    logo->setPixmap(QIcon(QStringLiteral(":/icons/app.ico")).pixmap(QSize(48, 48), logoScale));
 
     auto* brandText = new QVBoxLayout();
     brandText->setSpacing(1);
@@ -721,9 +730,10 @@ void MainWindow::onChromeWindowsFound(const QJsonArray& windows)
                 ? "Chrome window"
                 : item.value("title").toString();
             const QString hwnd = item.value("hwnd").toString();
-            const QString label = QString("%1  ·  PID %2")
-                .arg(title)
-                .arg(item.value("processId").toInteger());
+            const QString profile = item.value("profileName").toString();
+            const QString label = profile.isEmpty()
+                ? QString("%1  ·  PID %2").arg(title).arg(item.value("processId").toInteger())
+                : QString("%1  ·  %2").arg(title, profile);
             chromeWindowCombo_->addItem(label, hwnd);
         }
     }
@@ -825,9 +835,9 @@ QList<int> askTabsToImport(QWidget* parent, const QJsonArray& tabs)
     layout->setSpacing(12);
 
     auto* intro = new QLabel(
-        "Every Chrome tab is listed. Check one or more tabs to import. "
-        "Chrome reports a page address only for the tab currently shown in each window, "
-        "so other tabs are listed by title.",
+        "Google Chrome browser tabs, grouped by profile. Other Chromium browsers "
+        "are not listed. Check one or more tabs to import. A page address is "
+        "available only for the tab currently shown in each window.",
         &dialog);
     intro->setObjectName("settingsBody");
     intro->setWordWrap(true);
@@ -845,9 +855,31 @@ QList<int> askTabsToImport(QWidget* parent, const QJsonArray& tabs)
     QList<QCheckBox*> boxes;
     boxes.reserve(tabs.size());
 
-    for (const QJsonValue& value : tabs)
+    QStringList profileOrder;
+    QHash<QString, QList<int>> tabsByProfile;
+    for (int index = 0; index < tabs.size(); ++index)
     {
-        const QJsonObject tab = value.toObject();
+        const QString profileKey = tabs.at(index).toObject().value("profileKey").toString();
+        if (!tabsByProfile.contains(profileKey))
+            profileOrder.append(profileKey);
+        tabsByProfile[profileKey].append(index);
+    }
+
+    for (const QString& profileKey : profileOrder)
+    {
+        const QJsonObject first =
+            tabs.at(tabsByProfile.value(profileKey).first()).toObject();
+        const QString profileName = first.value("profileName").toString().isEmpty()
+            ? QString("Google Chrome")
+            : first.value("profileName").toString();
+
+        auto* heading = new QLabel(profileName, listHost);
+        heading->setObjectName("profileHeading");
+        listLayout->addWidget(heading);
+
+        for (int index : tabsByProfile.value(profileKey))
+        {
+        const QJsonObject tab = tabs.at(index).toObject();
         auto* row = new QWidget(listHost);
         row->setObjectName("tabImportRow");
         auto* rowLayout = new QVBoxLayout(row);
@@ -860,6 +892,7 @@ QList<int> askTabsToImport(QWidget* parent, const QJsonArray& tabs)
 
         auto* box = new QCheckBox(name, row);
         box->setObjectName("tabImportCheck");
+        box->setProperty("tabIndex", index);
         auto* detail = new QLabel(tabDetailText(tab), row);
         detail->setObjectName("mutedText");
         detail->setWordWrap(true);
@@ -869,6 +902,7 @@ QList<int> askTabsToImport(QWidget* parent, const QJsonArray& tabs)
         rowLayout->addWidget(detail);
         listLayout->addWidget(row);
         boxes.append(box);
+        }
     }
 
     listLayout->addStretch();
@@ -921,10 +955,10 @@ QList<int> askTabsToImport(QWidget* parent, const QJsonArray& tabs)
         return {};
 
     QList<int> selected;
-    for (int index = 0; index < boxes.size(); ++index)
+    for (const QCheckBox* box : boxes)
     {
-        if (boxes.at(index)->isChecked())
-            selected.append(index);
+        if (box->isChecked())
+            selected.append(box->property("tabIndex").toInt());
     }
     return selected;
 }
@@ -973,6 +1007,7 @@ void MainWindow::onChromeTabsListed(const QJsonObject& result)
 
     int imported = 0;
     int skipped = 0;
+    QJsonArray targets;
 
     for (int index : selected)
     {
@@ -985,6 +1020,7 @@ void MainWindow::onChromeTabsListed(const QJsonObject& result)
         meeting.title = tab.value("tabName").toString();
         meeting.host = tab.value("host").toString();
         meeting.meetingId = tab.value("meetingId").toString();
+        meeting.profileName = tab.value("profileName").toString();
 
         const bool duplicate = std::any_of(
             meetings_.cbegin(), meetings_.cend(),
@@ -1005,18 +1041,88 @@ void MainWindow::onChromeTabsListed(const QJsonObject& result)
 
         meetings_.append(meeting);
         ++imported;
-        appendLog(QString("Imported \"%1\" from Chrome window 0x%2%3.")
-                      .arg(meeting.title, meeting.windowHandle)
-                      .arg(meeting.meetingId.isEmpty()
-                               ? QString()
-                               : QString(", meeting %1").arg(meeting.meetingId)));
+        targets.append(QJsonObject{
+            {"windowHandle", meeting.windowHandle},
+            {"tabRuntimeId", meeting.tabRuntimeId},
+            {"tabName", meeting.title},
+            {"requestKey", meeting.key()}
+        });
+        appendLog(QString("Imported \"%1\" from %2.")
+                      .arg(meeting.title,
+                           meeting.profileName.isEmpty()
+                               ? QString("Google Chrome")
+                               : meeting.profileName));
     }
 
-    if (imported > 0)
-        refreshMeetingCards();
+    if (imported == 0)
+    {
+        statusBar()->showMessage(
+            QString("Imported 0 tab(s) · %1 already managed").arg(skipped));
+        return;
+    }
 
-    statusBar()->showMessage(
-        QString("Imported %1 tab(s) · %2 already managed").arg(imported).arg(skipped));
+    appendLog(QString("Opening %1 imported meeting(s) and reading the microphone.")
+                  .arg(imported));
+    setMeetingBusy(true, "Opening the meeting and reading the microphone...");
+    emit prepareImportedMeetingsRequested(targets);
+}
+
+void MainWindow::onImportedMeetingsPrepared(const QJsonArray& results)
+{
+    QString lastActivated;
+    QStringList failures;
+
+    for (const QJsonValue& value : results)
+    {
+        const QJsonObject result = value.toObject();
+        ManagedMeeting* meeting = findMeeting(result.value("requestKey").toString());
+        if (!meeting)
+            continue;
+
+        const QString updatedRuntimeId = result.value("tabRuntimeId").toString();
+        if (!updatedRuntimeId.isEmpty())
+            meeting->tabRuntimeId = updatedRuntimeId;
+
+        if (result.value("activated").toBool())
+            lastActivated = meeting->key();
+
+        const QString state = result.value("state").toString();
+        if (state == "muted")
+            meeting->microphone = Microphone::Muted;
+        else if (state == "unmuted")
+            meeting->microphone = Microphone::Unmuted;
+        else if (state == "audioNotConnected")
+            meeting->microphone = Microphone::AudioNotConnected;
+        else
+            meeting->microphone = Microphone::Unknown;
+
+        if (!result.value("ok").toBool())
+        {
+            failures.append(QString("%1: %2")
+                                .arg(meeting->title, result.value("error").toString()));
+            appendLog(QString("Could not prepare \"%1\": %2")
+                          .arg(meeting->title, result.value("error").toString()));
+        }
+        else
+        {
+            appendLog(QString("\"%1\" is %2.").arg(meeting->title, state));
+        }
+    }
+
+    if (!lastActivated.isEmpty())
+        activeMeetingKey_ = lastActivated;
+
+    setMeetingBusy(false, failures.isEmpty()
+        ? "Imported meetings are active and the microphone was read"
+        : "Imported meetings, with some microphone reads failing");
+
+    if (!failures.isEmpty())
+    {
+        QMessageBox::warning(
+            this,
+            "Some meetings could not be read",
+            failures.join("\n\n"));
+    }
 }
 
 QFrame* MainWindow::createMeetingCard(const ManagedMeeting& meeting)
@@ -1046,8 +1152,10 @@ QFrame* MainWindow::createMeetingCard(const ManagedMeeting& meeting)
     title->setObjectName("meetingTitle");
     title->setWordWrap(true);
 
-    auto* source = makeMutedLabel(
-        QString("Chrome (Window %1)").arg(meeting.windowNumber), card);
+    const QString sourceText = meeting.profileName.isEmpty()
+        ? QString("Chrome (Window %1)").arg(meeting.windowNumber)
+        : meeting.profileName;
+    auto* source = makeMutedLabel(sourceText, card);
 
     titleColumn->addWidget(title);
     titleColumn->addWidget(source);
@@ -1101,38 +1209,30 @@ QFrame* MainWindow::createMeetingCard(const ManagedMeeting& meeting)
     auto* actionRow = new QHBoxLayout();
     actionRow->setSpacing(8);
 
-    auto* activateButton = new QPushButton(
-        isActive ? "✓  Set Active" : "▶  Set Active", card);
-    activateButton->setObjectName(isActive ? "primaryButton" : "secondaryButton");
-    connect(activateButton, &QPushButton::clicked,
-            this, [this, key] { activateMeeting(key); });
-
-    QPushButton* microphoneButton = nullptr;
-    switch (meeting.microphone)
+    const auto addMicrophoneButton = [this, card, actionRow, key](const QString& label, bool mute)
     {
-    case Microphone::Muted:
-        microphoneButton = new QPushButton("◉  Unmute", card);
-        connect(microphoneButton, &QPushButton::clicked,
-                this, [this, key] { setMicrophone(key, false); });
-        break;
-    case Microphone::Unmuted:
-        microphoneButton = new QPushButton("◉  Mute", card);
-        connect(microphoneButton, &QPushButton::clicked,
-                this, [this, key] { setMicrophone(key, true); });
-        break;
-    default:
-        microphoneButton = new QPushButton("◉  Read Mic", card);
-        microphoneButton->setToolTip(
-            "Read Zoom's microphone control in this tab before changing it.");
-        connect(microphoneButton, &QPushButton::clicked,
-                this, [this, key] { readMicrophone(key); });
-        break;
+        auto* button = new QPushButton(label, card);
+        button->setObjectName(mute ? "dangerButton" : "secondaryButton");
+        button->setEnabled(!meetingBusy_);
+        connect(button, &QPushButton::clicked,
+                this, [this, key, mute] { setMicrophone(key, mute); });
+        actionRow->addWidget(button, 1);
+    };
+
+    if (meeting.microphone == Microphone::Muted)
+        addMicrophoneButton("◉  Unmute", false);
+    else if (meeting.microphone == Microphone::Unmuted)
+        addMicrophoneButton("◉  Mute", true);
+    else if (meeting.microphone != Microphone::AudioNotConnected)
+    {
+        addMicrophoneButton("◉  Mute", true);
+        addMicrophoneButton("◉  Unmute", false);
     }
-    microphoneButton->setObjectName("secondaryButton");
 
     auto* moreButton = new QPushButton("⋯", card);
     moreButton->setObjectName("secondaryButton");
     moreButton->setFixedWidth(40);
+    moreButton->setEnabled(!meetingBusy_);
 
     auto* menu = new QMenu(moreButton);
     menu->addAction("Refresh microphone state",
@@ -1140,12 +1240,6 @@ QFrame* MainWindow::createMeetingCard(const ManagedMeeting& meeting)
     menu->addAction("Remove from list", this, [this, key] { removeMeeting(key); });
     moreButton->setMenu(menu);
 
-    activateButton->setEnabled(!meetingBusy_);
-    microphoneButton->setEnabled(!meetingBusy_);
-    moreButton->setEnabled(!meetingBusy_);
-
-    actionRow->addWidget(activateButton, 1);
-    actionRow->addWidget(microphoneButton, 1);
     actionRow->addWidget(moreButton);
     layout->addLayout(actionRow);
 
@@ -1188,7 +1282,9 @@ void MainWindow::refreshMeetingCards()
     const ManagedMeeting* active = findMeeting(activeMeetingKey_);
     activeMeetingValue_->setText(active ? active->title : "None");
     activeMeetingDetail_->setText(active
-        ? QString("Chrome (Window %1)").arg(active->windowNumber)
+        ? (active->profileName.isEmpty()
+               ? QString("Chrome (Window %1)").arg(active->windowNumber)
+               : active->profileName)
         : "No active meeting selected");
 
     releaseActiveButton_->setEnabled(active != nullptr && !meetingBusy_);
@@ -1501,11 +1597,8 @@ void MainWindow::applyDarkProfessionalTheme()
             border-right: 1px solid #26364A;
         }
         QLabel#brandLogo {
-            color: white;
-            background: #1677E8;
-            border-radius: 11px;
-            font-size: 25pt;
-            font-weight: 700;
+            background: transparent;
+            border: none;
         }
         QLabel#brandName {
             color: #F8FAFC;
@@ -1633,6 +1726,12 @@ void MainWindow::applyDarkProfessionalTheme()
             border-radius: 9px;
             font-size: 15pt;
             font-weight: 700;
+        }
+        QLabel#profileHeading {
+            color: #93C5FD;
+            font-size: 10pt;
+            font-weight: 700;
+            padding-top: 8px;
         }
         QLabel#activeBadge {
             color: #052E1A;

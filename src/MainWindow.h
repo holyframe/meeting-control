@@ -44,6 +44,7 @@ signals:
                                 bool muted,
                                 const QString& requestKey);
     void muteAllRequested(const QJsonArray& targets);
+    void prepareImportedMeetingsRequested(const QJsonArray& targets);
 
 private slots:
     void onInitialized(bool success, const QString& message);
@@ -54,6 +55,7 @@ private slots:
     void onMicrophoneRead(const QJsonObject& result);
     void onMicrophoneSet(const QJsonObject& result);
     void onMuteAllFinished(const QJsonArray& results);
+    void onImportedMeetingsPrepared(const QJsonArray& results);
     void refreshChromeWindows();
     void inspectSelectedWindow();
     void requestMeetingTabImport();
@@ -80,6 +82,7 @@ private:
         QString title;
         QString host;
         QString meetingId;
+        QString profileName;
         int windowNumber = 0;
         Microphone microphone = Microphone::Unknown;
 

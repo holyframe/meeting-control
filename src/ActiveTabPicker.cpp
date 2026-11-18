@@ -125,6 +125,8 @@ QJsonObject makeTabRecord(
     tab.insert("windowHandle", window.value("hwnd"));
     tab.insert("windowTitle", window.value("title"));
     tab.insert("processId", window.value("processId"));
+    tab.insert("profileName", window.value("profileName"));
+    tab.insert("profileKey", window.value("profileKey"));
 
     const QString name = readStringProperty(element, UIA_NamePropertyId);
     tab.insert("tabName", name.isEmpty() ? window.value("title").toString() : name);
@@ -172,8 +174,10 @@ QJsonObject ActiveTabPicker::listChromeTabs() const
     {
         const QJsonObject window = value.toObject();
 
+        const QString title = window.value("title").toString();
         if (window.value("className").toString() != "Chrome_WidgetWin_1"
-            || window.value("title").toString().isEmpty())
+            || title.isEmpty()
+            || title.contains("DevTools", Qt::CaseInsensitive))
             continue;
 
         bool ok = false;
@@ -199,12 +203,12 @@ QJsonObject ActiveTabPicker::listChromeTabs() const
     }
 
     if (browserWindows == 0)
-        return failure("No Chrome window is open.");
+        return failure("No Google Chrome window is open.");
 
     if (tabs.isEmpty())
     {
         const QString detail = errors.isEmpty()
-            ? QString("No tabs could be read.")
+            ? QString("No Google Chrome browser tabs could be read.")
             : errors.join(" ");
         return failure(detail);
     }
@@ -272,24 +276,17 @@ QJsonObject ActiveTabPicker::readWindowTabs(
 
     QJsonArray tabs;
 
-    if (ui.tabItems.empty())
+    // Windows without a tab strip are apps, popups or other Chromium UI, not
+    // browser tabs.
+    for (int index = 0; index < static_cast<int>(ui.tabItems.size()); ++index)
     {
-        // Installed web apps and some Chrome windows have no tab strip.
         tabs.append(makeTabRecord(
-            root.Get(), window, true, windowUrl, windowUrlSource, 0));
-    }
-    else
-    {
-        for (int index = 0; index < static_cast<int>(ui.tabItems.size()); ++index)
-        {
-            tabs.append(makeTabRecord(
-                ui.tabItems[static_cast<std::size_t>(index)].Get(),
-                window,
-                index == selectedIndex,
-                windowUrl,
-                windowUrlSource,
-                index));
-        }
+            ui.tabItems[static_cast<std::size_t>(index)].Get(),
+            window,
+            index == selectedIndex,
+            windowUrl,
+            windowUrlSource,
+            index));
     }
 
     return QJsonObject{

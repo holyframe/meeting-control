@@ -36,13 +36,11 @@ The meeting list starts empty. The app does not display fabricated meetings or p
 
 ## Important: current build is read-only
 
-**Pick Up Meeting Tabs** lists every Chrome tab through UI Automation and lets you check one or more tabs to import. It does not import the active tab on its own. Chrome exposes a page address only for the tab currently shown in each window; other tabs are listed by title. When an address can be read and it is a Zoom web-client meeting (`/wc/<meeting id>` on `zoom.us`, `zoom.com`, or `zoomgov.com`), the meeting ID is stored. Only the host and meeting ID are kept; the full URL is not stored or logged because it can contain the passcode. Managed meetings are kept in memory only.
+**Pick Up Meeting Tabs** lists Google Chrome browser tabs, grouped by Chrome profile, and lets you check one or more to import. Chromium and other Chromium-based browsers are not listed, and neither are Chrome windows that have no tab strip. Importing a tab selects it, brings its window forward, and reads the Zoom microphone, so the card starts out active and shows Mute or Unmute. Chrome exposes a page address only for the tab currently shown in each window. When that address is a Zoom web-client meeting (`/wc/<meeting id>` on `zoom.us`, `zoom.com`, or `zoomgov.com`), the meeting ID is stored. Only the host and meeting ID are kept; the full URL is not stored or logged because it can contain the passcode. Managed meetings are kept in memory only.
 
 Each managed meeting card offers:
 
-- **Set Active** — selects that tab in its Chrome window and brings the window to the front.
-- **Read Mic** — selects the tab and reads Zoom's microphone control, showing Muted, Unmuted, or Audio not joined.
-- **Mute / Unmute** — reads the control, acts only when the current state differs, then re-reads the control until Zoom reports the new state.
+- **Mute / Unmute** — shown from the microphone state read at import. It reads the control again, acts only when the current state differs, then re-reads the control until Zoom reports the new state.
 - **⋯** — refresh the microphone state or remove the meeting from the list.
 
 **Mute All Meetings** applies the same read-act-verify sequence to every managed meeting in turn. **Release Active Meeting** only clears the active marker in this app; it does not change Zoom.

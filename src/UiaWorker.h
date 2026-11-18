@@ -37,6 +37,7 @@ public slots:
                             bool muted,
                             const QString& requestKey);
     void muteAll(const QJsonArray& targets);
+    void prepareImportedMeetings(const QJsonArray& targets);
     void shutdown();
 
 signals:
@@ -48,6 +49,7 @@ signals:
     void microphoneRead(const QJsonObject& result);
     void microphoneSet(const QJsonObject& result);
     void muteAllFinished(const QJsonArray& results);
+    void importedMeetingsPrepared(const QJsonArray& results);
     void diagnostic(const QString& message);
 
 private:

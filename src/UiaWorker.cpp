@@ -211,6 +211,41 @@ void UiaWorker::muteAll(const QJsonArray& targets)
     emit muteAllFinished(results);
 }
 
+void UiaWorker::prepareImportedMeetings(const QJsonArray& targets)
+{
+    initialize();
+
+    QJsonArray results;
+    if (!automation_)
+    {
+        emit importedMeetingsPrepared(results);
+        return;
+    }
+
+    const ZoomMeetingController controller(automation_.Get());
+
+    for (const QJsonValue& value : targets)
+    {
+        const QJsonObject target = value.toObject();
+
+        bool ok = false;
+        const qulonglong handle =
+            target.value("windowHandle").toString().toULongLong(&ok, 16);
+
+        QJsonObject result = ok
+            ? controller.activateAndReadMicrophone(
+                  static_cast<quintptr>(handle),
+                  target.value("tabRuntimeId").toString(),
+                  target.value("tabName").toString())
+            : QJsonObject{{"ok", false}, {"error", "The Chrome window handle is invalid."}};
+
+        result.insert("requestKey", target.value("requestKey"));
+        results.append(result);
+    }
+
+    emit importedMeetingsPrepared(results);
+}
+
 void UiaWorker::shutdown()
 {
     automation2_.Reset();

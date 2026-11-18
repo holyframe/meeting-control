@@ -13,20 +13,25 @@
 - [x] UI Automation Control View tree inspection
 - [x] Timestamped diagnostics log
 - [x] Dedicated COM/UIA worker thread
-- [x] Read-only safety posture
+- [x] Read-act-verify microphone and computer-audio controls
 - [x] List every Chrome tab and import the ones the user selects
 - [x] Read a Zoom meeting ID when the shown tab's address is available
 - [x] Add/remove managed meeting records (in memory)
 - [x] Activate a managed meeting
 - [x] Discover Zoom microphone control and state
 - [x] Mute/unmute with post-action verification
+- [x] Per-card Sound On / Sound Off through Join/Leave Computer Audio
+- [x] Handle the two-step computer-audio chooser when accessible
+- [x] Refresh microphone and sound state after audio changes; unread state on failure
+- [x] Simulated audio-transition tests and offscreen meeting-card tests
 - [x] Mute All / release-active coordination
 
 ## Not implemented yet
 
 - [ ] Persist meeting identity across restarts
-- [ ] Observe microphone changes made inside Zoom
+- [ ] Observe microphone and computer-audio changes made inside Zoom
+- [ ] Validate sound controls against a live Zoom meeting on the target Chrome build
 
 ## Next milestone
 
-Confirm microphone detection against a real Zoom meeting. If a meeting reports that no microphone control was found, inspect that Chrome window on the Live Diagnostics page and compare the accessible names of the Zoom toolbar buttons with the names this build looks for.
+Validate microphone and Join/Leave Computer Audio detection against a real Zoom meeting. Inspect the audio menu and join chooser in Live Diagnostics if accessible controls cannot be found. Sound Off disconnects computer audio in both directions; Sound On reconnects it and refreshes the microphone state. Automated tests use simulated controls and do not establish live Zoom compatibility.

@@ -32,37 +32,44 @@ The meeting list starts empty. The app does not display fabricated meetings or p
 - Displays timestamped activity and inspection results.
 - Runs UI Automation calls on a dedicated worker thread.
 - Applies UI Automation connection/transaction timeouts where `IUIAutomation2` is available.
-- Does not launch Chrome, modify Chrome profiles, use CDP, install an extension, or change any meeting state.
+- Controls the microphone and joins/leaves computer audio through Zoom's accessible controls, verifying each result.
+- Does not launch Chrome, modify Chrome profiles, use CDP, or install an extension.
 
-## Important: current build is read-only
+## Meeting controls
 
-**Pick Up Meeting Tabs** lists Google Chrome browser tabs, grouped by Chrome profile, and lets you check one or more to import. Chromium and other Chromium-based browsers are not listed, and neither are Chrome windows that have no tab strip. Importing a tab selects it, brings its window forward, and reads the Zoom microphone, so the card starts out active and shows Mute or Unmute. Chrome exposes a page address only for the tab currently shown in each window. When that address is a Zoom web-client meeting (`/wc/<meeting id>` on `zoom.us`, `zoom.com`, or `zoomgov.com`), the meeting ID is stored. Only the host and meeting ID are kept; the full URL is not stored or logged because it can contain the passcode. Managed meetings are kept in memory only.
+**Pick Up Meeting Tabs** lists Google Chrome browser tabs, grouped by Chrome profile, and lets you check one or more to import. Chromium and other Chromium-based browsers are not listed, and neither are Chrome windows that have no tab strip. Importing a tab selects it, brings its window forward, and reads the Zoom microphone and computer-audio connection. Chrome exposes a page address only for the tab currently shown in each window. When that address is a Zoom web-client meeting (`/wc/<meeting id>` on `zoom.us`, `zoom.com`, or `zoomgov.com`), the meeting ID is stored. Only the host and meeting ID are kept; the full URL is not stored or logged because it can contain the passcode. Managed meetings are kept in memory only.
 
 Each managed meeting card offers:
 
 - **Mute / Unmute** — shown from the microphone state read at import. It reads the control again, acts only when the current state differs, then re-reads the control until Zoom reports the new state.
-- **⋯** — refresh the microphone state or remove the meeting from the list.
+- **Sound Off** — opens Zoom's audio menu if needed, chooses **Leave Computer Audio**, and verifies that Zoom exposes a join-audio control. This disconnects the microphone as well as incoming sound, while leaving the meeting and video running.
+- **Sound On** — chooses **Join Audio**, handles the **Join with Computer Audio** chooser when exposed, and verifies the connection. The microphone is read again after reconnecting; its resulting state follows Zoom's settings.
+- **Read Sound** — shown when the connection state has not been read or could not be verified. Reads the state without joining/leaving audio.
+- **⋯** — refresh the microphone or sound state, or remove the meeting from the list.
+
+Sound refers to Zoom's computer-audio connection, not a separate speaker mute or the Windows volume. **Join Audio** confirms disconnected computer audio; **Leave Computer Audio** confirms a connection, opening the audio menu to read it when necessary. Microphone labels are read separately and cannot by themselves verify sound-on. Conflicting or unrecognized controls are treated as unknown. No sound is inferred from silence or from a successful click alone.
 
 **Mute All Meetings** applies the same read-act-verify sequence to every managed meeting in turn. **Release Active Meeting** only clears the active marker in this app; it does not change Zoom.
 
-A card never shows a microphone state that was not read back from Zoom. If a change cannot be verified, the state is reset to unread and the failure is reported.
+A card shows the last audio states read back from Zoom. If a sound change cannot be verified, both the sound and microphone states are reset to unread and the failure is reported. The controller stops if its meeting tab is no longer selected. Audio controls must be visible, enabled, and uniquely identified; no coordinates or blind keyboard toggles are used.
 
 The following features are **not implemented yet**:
 
 - Persisting managed meetings across restarts.
-- Watching for microphone changes made in Zoom itself; states refresh only when this app reads them.
+- Watching for microphone or computer-audio changes made in Zoom itself; states refresh only when this app reads them.
 
 ## UI Automation validation gate
 
-Before implementing meeting pickup or microphone control, confirm that the user's Chrome + Zoom Web App accessibility tree exposes:
+Validate control discovery against the user's Chrome + Zoom Web App accessibility tree:
 
 1. The Chrome tab strip and currently selected `TabItem`.
 2. The active Zoom page/document.
 3. The Zoom microphone control.
 4. A reliable state indicator (for example, accessible name or `TogglePattern` state).
 5. A supported action pattern (for example, `InvokePattern` or `TogglePattern`).
+6. The audio menu's **Leave Computer Audio** option and the disconnected **Join Audio** / **Join with Computer Audio** controls.
 
-Do not add blind toggling or coordinate-based clicking. Any future microphone operation must read the current state, perform the action only when needed, and read the state again to verify the result.
+Every microphone or sound operation must read the current state, perform the action only when needed, and read the state again to verify the result. The current implementation invokes accessible default actions and can expand an accessible audio menu.
 
 ## Requirements
 
@@ -102,7 +109,25 @@ Run the application:
 8. Review the **Accessibility Tree** tab.
 9. Look for `TabItem`, `Document`, and button nodes related to Zoom audio/microphone controls.
 
-The selector lists Chrome windows, not individual tabs. The app does not yet select or register a tab.
+The diagnostics selector lists Chrome windows. Use **Pick Up Meeting Tabs** on the dashboard to import individual tabs.
+
+## Sound-control validation
+
+1. Import a Zoom web meeting with computer audio connected. Confirm the card reads **Sound on** and shows **Sound Off**.
+2. Click **Sound Off**. Confirm Zoom leaves computer audio, the card reads **Sound off** and **Mic disconnected**, and the action changes to **Sound On**.
+3. Click **Sound On**. Confirm any computer-audio chooser is handled, the card reads **Sound on**, and the microphone matches Zoom's actual state.
+4. Use **Refresh sound state** after changing audio directly in Zoom.
+5. Verify a second meeting remains unchanged. Repeatedly requesting an already-established state must not click the join/leave control again.
+6. Hide/unavailable controls, a closed tab, or an unverified operation must produce an unread state and diagnostics rather than assumed success.
+
+Automated state-transition and card tests run without accessing Chrome or any real meeting:
+
+```powershell
+cmake -S . -B build -DCMAKE_PREFIX_PATH="C:\Qt\6.8.3\msvc2022_64" -DMEETING_CONTROLLER_BUILD_TESTS=ON
+cmake --build build --config Release
+$env:PATH = "C:\Qt\6.8.3\msvc2022_64\bin;" + $env:PATH
+ctest --test-dir build -C Release --output-on-failure
+```
 
 ## What to share for the next implementation phase
 
@@ -124,7 +149,8 @@ Redact meeting titles, participant names, and other private details before shari
 - Background Chrome tabs are listed by title. Their page address is available only for the tab currently shown in that window.
 - Chrome renders only the selected tab of each window, so a meeting tab is selected before its microphone is read or changed. Controlling several meetings therefore switches tabs in Chrome.
 - The microphone control is identified by its accessible name (`Mute`, `Unmute`, or a name mentioning the microphone). A Zoom redesign that renames the control would break detection, which is reported as "no microphone control was found" rather than guessed at.
-- Meetings that have not joined audio expose a Join Audio control instead; these are reported and left unchanged.
+- The sound button joins/leaves computer audio and therefore affects microphone connectivity too. It does not provide speaker-only muting.
+- Audio detection currently recognizes English control names. Different Zoom layouts, localized labels, unavailable action patterns, phone audio, or permission dialogs may require manual action in Zoom and a fresh read.
 
 ## Source layout
 
@@ -133,7 +159,9 @@ Redact meeting titles, participant names, and other private details before shari
 - `src/UiaWorker.*` — COM/UIA worker thread and initialization.
 - `src/UiaTreeInspector.*` — bounded Control View tree inspection and JSON serialization.
 - `src/ActiveTabPicker.*` — lists Chrome tabs for import.
-- `src/ZoomMeetingController.*` — tab activation and read/act/verify microphone control.
+- `src/ZoomMeetingController.*` — tab activation and UIA adapters for microphone and computer-audio control.
+- `src/ZoomAudioState.*` — audio-control recognition and read/act/verify connection transitions.
+- `tests/MeetingControllerTests.cpp` — simulated audio transitions and offscreen card tests.
 - `src/UiaSupport.*` — shared UIA property reads and Chrome browser-UI scanning.
 - `src/main.cpp` — Qt application entry point.
 

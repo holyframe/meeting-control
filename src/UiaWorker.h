@@ -36,6 +36,15 @@ public slots:
                             const QString& tabName,
                             bool muted,
                             const QString& requestKey);
+    void readAudioConnection(quintptr hwndValue,
+                             const QString& tabRuntimeId,
+                             const QString& tabName,
+                             const QString& requestKey);
+    void setAudioConnected(quintptr hwndValue,
+                           const QString& tabRuntimeId,
+                           const QString& tabName,
+                           bool connected,
+                           const QString& requestKey);
     void muteAll(const QJsonArray& targets);
     void prepareImportedMeetings(const QJsonArray& targets);
     void shutdown();
@@ -48,6 +57,8 @@ signals:
     void meetingActivated(const QJsonObject& result);
     void microphoneRead(const QJsonObject& result);
     void microphoneSet(const QJsonObject& result);
+    void audioConnectionRead(const QJsonObject& result);
+    void audioConnectionSet(const QJsonObject& result);
     void muteAllFinished(const QJsonArray& results);
     void importedMeetingsPrepared(const QJsonArray& results);
     void diagnostic(const QString& message);

@@ -20,12 +20,15 @@
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QSizePolicy>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QStyle>
 #include <QTabWidget>
 #include <QThread>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QMetaObject>
@@ -197,6 +200,14 @@ MainWindow::MainWindow(QWidget* parent)
             worker_, &UiaWorker::setMicrophoneMuted, Qt::QueuedConnection);
     connect(worker_, &UiaWorker::microphoneSet,
             this, &MainWindow::onMicrophoneSet, Qt::QueuedConnection);
+    connect(this, &MainWindow::audioReadRequested,
+            worker_, &UiaWorker::readAudioConnection, Qt::QueuedConnection);
+    connect(worker_, &UiaWorker::audioConnectionRead,
+            this, &MainWindow::onAudioConnectionRead, Qt::QueuedConnection);
+    connect(this, &MainWindow::audioSetRequested,
+            worker_, &UiaWorker::setAudioConnected, Qt::QueuedConnection);
+    connect(worker_, &UiaWorker::audioConnectionSet,
+            this, &MainWindow::onAudioConnectionSet, Qt::QueuedConnection);
     connect(this, &MainWindow::muteAllRequested,
             worker_, &UiaWorker::muteAll, Qt::QueuedConnection);
     connect(worker_, &UiaWorker::muteAllFinished,
@@ -226,7 +237,7 @@ MainWindow::MainWindow(QWidget* parent)
     applyDarkProfessionalTheme();
     navigateTo(0);
     statusBar()->showMessage(
-        "Ready · Microphone automation is not enabled");
+        "Ready · Pick up meeting tabs to read microphone and sound states");
     workerThread_->start();
 }
 
@@ -375,7 +386,7 @@ QWidget* MainWindow::createDashboardPage()
         "#078A59", &activeMeetingValue_, &activeMeetingDetail_), 0, 1);
 
     metrics->addWidget(makeMetricCard(
-        page, "◉", "Safety Status", "Verified", "Mic state is re-read after each change",
+        page, "◉", "Safety Status", "Idle", "Pick up a meeting to read its audio state",
         "#078A59", &safetyValue_, &safetyDetail_), 0, 2);
 
     metrics->addWidget(makeMetricCard(
@@ -426,11 +437,14 @@ QWidget* MainWindow::createDashboardPage()
     layout->addLayout(meetingHeader);
 
     auto* meetingsArea = new QScrollArea(page);
+    meetingsArea_ = meetingsArea;
     meetingsArea->setObjectName("meetingsScrollArea");
     meetingsArea->setWidgetResizable(true);
     meetingsArea->setFrameShape(QFrame::NoFrame);
 
     auto* meetingsContent = new QWidget(meetingsArea);
+    meetingsContent->setObjectName("meetingsContent");
+    meetingsContent->setObjectName("meetingsContent");
     auto* meetingsLayout = new QGridLayout(meetingsContent);
     meetingsLayout->setContentsMargins(0, 2, 0, 8);
     meetingsLayout->setSpacing(14);
@@ -466,7 +480,7 @@ QWidget* MainWindow::createDashboardPage()
     layout->addWidget(meetingsArea, 1);
 
     auto* footerHint = makeMutedLabel(
-        "Muting reads Zoom's microphone control first, acts only when the state differs, and re-reads it to confirm the result.",
+        "Controls read Zoom's state before and after each change. Sound Off leaves computer audio, including your microphone.",
         page);
     layout->addWidget(footerHint);
 
@@ -578,9 +592,9 @@ QWidget* MainWindow::createSettingsPage()
     auto* safetyHeading = new QLabel("MICROPHONE SAFETY", safetyPanel);
     safetyHeading->setObjectName("panelHeading");
     auto* safetyText = new QLabel(
-        "Microphone automation is locked in this build. It will only be enabled after "
-        "the Zoom microphone control can be located through UI Automation and the "
-        "resulting mute state can be independently verified.", safetyPanel);
+        "Microphone and sound controls read Zoom's state before acting and verify it "
+        "afterwards. Sound Off leaves computer audio and disconnects the microphone too. "
+        "Sound On rejoins computer audio and reads the resulting microphone state.", safetyPanel);
     safetyText->setObjectName("settingsBody");
     safetyText->setWordWrap(true);
     safetyLayout->addWidget(safetyHeading);
@@ -637,7 +651,7 @@ QWidget* MainWindow::createAboutPage()
     technology->setObjectName("settingsBody");
     auto* scope = makeMutedLabel(
         "Current scope: Chrome window discovery, accessibility-tree inspection, and "
-        "picking up Chrome tabs you choose. Microphone control is not implemented yet.", panel);
+        "picking up Chrome tabs you choose, and verified microphone and computer-audio control.", panel);
     panelLayout->addWidget(appName);
     panelLayout->addWidget(version);
     panelLayout->addWidget(technology);
@@ -1079,33 +1093,25 @@ void MainWindow::onImportedMeetingsPrepared(const QJsonArray& results)
         if (!meeting)
             continue;
 
-        const QString updatedRuntimeId = result.value("tabRuntimeId").toString();
-        if (!updatedRuntimeId.isEmpty())
-            meeting->tabRuntimeId = updatedRuntimeId;
+        updateMeetingStates(*meeting, result);
 
         if (result.value("activated").toBool())
             lastActivated = meeting->key();
 
-        const QString state = result.value("state").toString();
-        if (state == "muted")
-            meeting->microphone = Microphone::Muted;
-        else if (state == "unmuted")
-            meeting->microphone = Microphone::Unmuted;
-        else if (state == "audioNotConnected")
-            meeting->microphone = Microphone::AudioNotConnected;
-        else
-            meeting->microphone = Microphone::Unknown;
-
-        if (!result.value("ok").toBool())
+        if (!result.value("ok").toBool() || result.contains("audioError"))
         {
+            const QString error = result.contains("audioError")
+                ? result.value("audioError").toString() : result.value("error").toString();
             failures.append(QString("%1: %2")
-                                .arg(meeting->title, result.value("error").toString()));
+                                .arg(meeting->title, error));
             appendLog(QString("Could not prepare \"%1\": %2")
-                          .arg(meeting->title, result.value("error").toString()));
+                          .arg(meeting->title, error));
         }
         else
         {
-            appendLog(QString("\"%1\" is %2.").arg(meeting->title, state));
+            appendLog(QString("\"%1\" microphone is %2; computer audio is %3.")
+                          .arg(meeting->title, result.value("state").toString(),
+                               result.value("audioState").toString()));
         }
     }
 
@@ -1113,8 +1119,8 @@ void MainWindow::onImportedMeetingsPrepared(const QJsonArray& results)
         activeMeetingKey_ = lastActivated;
 
     setMeetingBusy(false, failures.isEmpty()
-        ? "Imported meetings are active and the microphone was read"
-        : "Imported meetings, with some microphone reads failing");
+        ? "Imported meetings; microphone and sound states were read"
+        : "Imported meetings, with some audio reads failing");
 
     if (!failures.isEmpty())
     {
@@ -1179,32 +1185,42 @@ QFrame* MainWindow::createMeetingCard(const ManagedMeeting& meeting)
     switch (meeting.microphone)
     {
     case Microphone::Muted:
-        microphone->setText("◉ Muted");
+        microphone->setText("◉ Mic muted");
         microphone->setObjectName("micMuted");
         break;
     case Microphone::Unmuted:
-        microphone->setText("◉ Unmuted");
+        microphone->setText("◉ Mic on");
         microphone->setObjectName("micUnmuted");
         break;
     case Microphone::AudioNotConnected:
-        microphone->setText("◉ Audio not joined");
+        microphone->setText("◉ Mic disconnected");
         microphone->setObjectName("micUnknown");
         break;
     default:
-        microphone->setText("◉ Mic state not read");
+        microphone->setText("◉ Mic unread");
         microphone->setObjectName("micUnknown");
         break;
     }
 
+    auto* sound = new QLabel(card);
+    sound->setObjectName("soundState");
+    sound->setProperty("state", meeting.sound == Sound::On ? "connected"
+        : meeting.sound == Sound::Off ? "disconnected" : "unknown");
+    sound->setText(meeting.sound == Sound::On ? "Sound on"
+        : meeting.sound == Sound::Off ? "Sound off" : "Sound unread");
+    sound->setToolTip("Shows the last computer-audio connection state read from Zoom. "
+                      "It does not measure speaker volume.");
+    stateRow->addWidget(microphone);
+    stateRow->addStretch();
+    stateRow->addWidget(sound);
+    layout->addLayout(stateRow);
+
     auto* identity = makeMutedLabel(
         meeting.meetingId.isEmpty()
-            ? QString("|   Tab")
-            : QString("|   Zoom Meeting %1").arg(meeting.meetingId),
+            ? QString("Chrome tab")
+            : QString("Zoom Meeting %1").arg(meeting.meetingId),
         card);
-
-    stateRow->addWidget(microphone);
-    stateRow->addWidget(identity, 1);
-    layout->addLayout(stateRow);
+    layout->addWidget(identity);
 
     auto* actionRow = new QHBoxLayout();
     actionRow->setSpacing(8);
@@ -1228,6 +1244,32 @@ QFrame* MainWindow::createMeetingCard(const ManagedMeeting& meeting)
         addMicrophoneButton("◉  Mute", true);
         addMicrophoneButton("◉  Unmute", false);
     }
+    else
+        actionRow->addStretch();
+
+    auto* soundButton = new QPushButton(card);
+    soundButton->setObjectName("soundButton");
+    soundButton->setEnabled(!meetingBusy_);
+    if (meeting.sound == Sound::Unknown)
+    {
+        soundButton->setText("Read Sound");
+        soundButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+        soundButton->setToolTip("Read Zoom's computer-audio state before choosing Sound On or Off.");
+        connect(soundButton, &QPushButton::clicked,
+                this, [this, key] { readSound(key); });
+    }
+    else
+    {
+        const bool turnOn = meeting.sound == Sound::Off;
+        soundButton->setText(turnOn ? "Sound On" : "Sound Off");
+        soundButton->setIcon(style()->standardIcon(
+            turnOn ? QStyle::SP_MediaVolume : QStyle::SP_MediaVolumeMuted));
+        soundButton->setToolTip(turnOn
+            ? "Join computer audio, then read back the connection and microphone states."
+            : "Leave computer audio to turn sound off. This disconnects the microphone too.");
+        connect(soundButton, &QPushButton::clicked,
+                this, [this, key, turnOn] { setSound(key, turnOn); });
+    }
 
     auto* moreButton = new QPushButton("⋯", card);
     moreButton->setObjectName("secondaryButton");
@@ -1237,11 +1279,16 @@ QFrame* MainWindow::createMeetingCard(const ManagedMeeting& meeting)
     auto* menu = new QMenu(moreButton);
     menu->addAction("Refresh microphone state",
                     this, [this, key] { readMicrophone(key); });
+    menu->addAction("Refresh sound state",
+                    this, [this, key] { readSound(key); });
     menu->addAction("Remove from list", this, [this, key] { removeMeeting(key); });
     moreButton->setMenu(menu);
 
     actionRow->addWidget(moreButton);
     layout->addLayout(actionRow);
+    layout->addWidget(soundButton);
+    layout->addWidget(makeMutedLabel(
+        "Sound On/Off joins or leaves computer audio, including your microphone.", card));
 
     return card;
 }
@@ -1269,15 +1316,27 @@ void MainWindow::refreshMeetingCards()
     for (int index = 0; index < meetings_.size(); ++index)
     {
         QFrame* card = createMeetingCard(meetings_.at(index));
-        meetingsLayout_->addWidget(card, index / 3, index % 3);
         meetingCards_.append(card);
     }
+    layoutMeetingCards();
 
     const QString count = QString::number(meetings_.size());
     totalMeetingsValue_->setText(count);
     totalMeetingsDetail_->setText(
         meetings_.isEmpty() ? "No tabs picked up yet" : "Picked up from Chrome");
     meetingCountLabel_->setText(count);
+
+    const auto unread = std::count_if(meetings_.cbegin(), meetings_.cend(),
+        [](const ManagedMeeting& meeting)
+        {
+            return meeting.sound == Sound::Unknown || meeting.microphone == Microphone::Unknown;
+        });
+    safetyValue_->setText(meetingBusy_ ? "Checking" : meetings_.isEmpty() ? "Idle"
+        : unread > 0 ? "Unread" : "Verified");
+    safetyDetail_->setText(meetingBusy_ ? "Reading Zoom's audio controls"
+        : meetings_.isEmpty() ? "No audio states read yet"
+        : unread > 0 ? QString("%1 meeting(s) need an audio state read").arg(unread)
+        : "Last audio reads verified; refresh after Zoom changes");
 
     const ManagedMeeting* active = findMeeting(activeMeetingKey_);
     activeMeetingValue_->setText(active ? active->title : "None");
@@ -1315,6 +1374,27 @@ MainWindow::ManagedMeeting* MainWindow::findMeeting(const QString& key)
     }
 
     return nullptr;
+}
+
+void MainWindow::layoutMeetingCards()
+{
+    if (!meetingsArea_ || !meetingsLayout_)
+        return;
+    const int columns = std::clamp((meetingsArea_->viewport()->width() + 14) / 334, 1, 3);
+    for (QFrame* card : std::as_const(meetingCards_))
+        meetingsLayout_->removeWidget(card);
+    for (int column = 0; column < 3; ++column)
+        meetingsLayout_->setColumnStretch(column, column < columns ? 1 : 0);
+    meetingsLayout_->removeWidget(meetingEmptyCard_);
+    meetingsLayout_->addWidget(meetingEmptyCard_, 0, 0, 1, columns);
+    for (int index = 0; index < meetingCards_.size(); ++index)
+        meetingsLayout_->addWidget(meetingCards_.at(index), index / columns, index % columns);
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event)
+{
+    QMainWindow::resizeEvent(event);
+    QTimer::singleShot(0, this, [this] { layoutMeetingCards(); });
 }
 
 void MainWindow::setMeetingBusy(bool busy, const QString& statusMessage)
@@ -1387,6 +1467,28 @@ void MainWindow::setMicrophone(const QString& key, bool muted)
         meeting->handle(), meeting->tabRuntimeId, meeting->title, muted, key);
 }
 
+void MainWindow::readSound(const QString& key)
+{
+    const ManagedMeeting* meeting = findMeeting(key);
+    if (!meeting || meetingBusy_)
+        return;
+    appendLog(QString("Reading computer audio for \"%1\".").arg(meeting->title));
+    setMeetingBusy(true, "Reading Zoom's sound and microphone states...");
+    emit audioReadRequested(meeting->handle(), meeting->tabRuntimeId, meeting->title, key);
+}
+
+void MainWindow::setSound(const QString& key, bool on)
+{
+    const ManagedMeeting* meeting = findMeeting(key);
+    if (!meeting || meetingBusy_)
+        return;
+    appendLog(QString("Turning sound %1 for \"%2\" by %3 computer audio.")
+                  .arg(on ? "on" : "off", meeting->title, on ? "joining" : "leaving"));
+    setMeetingBusy(true, on ? "Joining computer audio and verifying sound..."
+                           : "Leaving computer audio and verifying sound...");
+    emit audioSetRequested(meeting->handle(), meeting->tabRuntimeId, meeting->title, on, key);
+}
+
 void MainWindow::onMeetingActivated(const QJsonObject& result)
 {
     const QString key = result.value("requestKey").toString();
@@ -1400,12 +1502,11 @@ void MainWindow::onMeetingActivated(const QJsonObject& result)
         return;
     }
 
-    activeMeetingKey_ = key;
-
     if (ManagedMeeting* meeting = findMeeting(key))
     {
         // The runtime ID changes when Chrome rebuilds the tab strip.
         meeting->tabRuntimeId = result.value("tabRuntimeId").toString();
+        activeMeetingKey_ = meeting->key();
         appendLog(QString("\"%1\" is now the active meeting.").arg(meeting->title));
     }
 
@@ -1422,9 +1523,8 @@ void MainWindow::applyMicrophoneResult(const QJsonObject& result, const QString&
         const QString error = result.value("error").toString();
         appendLog(action + " failed: " + error);
 
-        // An unverified change must not leave a stale state on the card.
-        if (meeting && result.contains("verified"))
-            meeting->microphone = Microphone::Unknown;
+        if (meeting)
+            updateMeetingStates(*meeting, result);
 
         setMeetingBusy(false, action + " failed");
         QMessageBox::warning(this, action + " failed", error);
@@ -1435,17 +1535,7 @@ void MainWindow::applyMicrophoneResult(const QJsonObject& result, const QString&
 
     if (meeting)
     {
-        if (state == "muted")
-            meeting->microphone = Microphone::Muted;
-        else if (state == "unmuted")
-            meeting->microphone = Microphone::Unmuted;
-        else if (state == "audioNotConnected")
-            meeting->microphone = Microphone::AudioNotConnected;
-        else
-            meeting->microphone = Microphone::Unknown;
-
-        if (result.contains("tabRuntimeId"))
-            meeting->tabRuntimeId = result.value("tabRuntimeId").toString();
+        updateMeetingStates(*meeting, result);
     }
 
     const QString title = meeting ? meeting->title : QString("meeting");
@@ -1471,6 +1561,85 @@ void MainWindow::onMicrophoneSet(const QJsonObject& result)
 {
     applyMicrophoneResult(
         result, result.value("requestedMuted").toBool() ? "Muting" : "Unmuting");
+}
+
+void MainWindow::updateMeetingStates(ManagedMeeting& meeting, const QJsonObject& result)
+{
+    const QString oldKey = meeting.key();
+    const QString runtimeId = result.value("tabRuntimeId").toString();
+    if (!runtimeId.isEmpty())
+        meeting.tabRuntimeId = runtimeId;
+    if (activeMeetingKey_ == oldKey)
+        activeMeetingKey_ = meeting.key();
+
+    if (!result.value("ok").toBool()
+        || (result.contains("verified") && !result.value("verified").toBool()))
+    {
+        meeting.microphone = Microphone::Unknown;
+        meeting.sound = Sound::Unknown;
+        return;
+    }
+
+    const QString state = result.value("state").toString();
+    meeting.microphone = state == "muted" ? Microphone::Muted
+        : state == "unmuted" ? Microphone::Unmuted
+        : state == "audioNotConnected" ? Microphone::AudioNotConnected : Microphone::Unknown;
+
+    if (result.contains("audioState"))
+    {
+        const QString audioState = result.value("audioState").toString();
+        meeting.sound = audioState == "connected" ? Sound::On
+            : audioState == "disconnected" ? Sound::Off : Sound::Unknown;
+    }
+    else
+    {
+        // A microphone action does not change a previously verified computer
+        // connection. Never infer sound-on from a microphone label by itself.
+        if (meeting.microphone == Microphone::AudioNotConnected)
+            meeting.sound = Sound::Off;
+        else if (meeting.microphone == Microphone::Unknown || meeting.sound != Sound::On)
+            meeting.sound = Sound::Unknown;
+    }
+}
+
+void MainWindow::applyAudioResult(const QJsonObject& result, const QString& action)
+{
+    ManagedMeeting* meeting = findMeeting(result.value("requestKey").toString());
+    const QString audioState = result.value("audioState").toString();
+    const bool verified = result.value("ok").toBool() && result.value("verified").toBool()
+        && (audioState == "connected" || audioState == "disconnected");
+    QJsonObject observation = result;
+    observation.insert("ok", verified);
+    if (meeting)
+        updateMeetingStates(*meeting, observation);
+
+    if (!verified)
+    {
+        const QString error = result.value("error").toString("Zoom's sound state could not be verified.");
+        appendLog(action + " failed: " + error);
+        setMeetingBusy(false, action + " failed · sound state unread");
+        QMessageBox::warning(this, action + " failed", error);
+        return;
+    }
+
+    const QString title = meeting ? meeting->title : QString("meeting");
+    appendLog(QString("\"%1\" sound is %2 (verified from \"%3\"); microphone is %4.")
+                  .arg(title, audioState == "connected" ? "on" : "off",
+                       result.value("audioControlName").toString(), result.value("state").toString()));
+    setMeetingBusy(false,
+        QString("%1 · Sound %2 · microphone state refreshed")
+            .arg(title, audioState == "connected" ? "on" : "off"));
+}
+
+void MainWindow::onAudioConnectionRead(const QJsonObject& result)
+{
+    applyAudioResult(result, "Reading sound");
+}
+
+void MainWindow::onAudioConnectionSet(const QJsonObject& result)
+{
+    applyAudioResult(result, result.value("requestedConnected").toBool()
+        ? "Turning sound on" : "Turning sound off");
 }
 
 void MainWindow::requestMuteAll()
@@ -1523,7 +1692,7 @@ void MainWindow::onMuteAllFinished(const QJsonArray& results)
         if (!result.value("ok").toBool())
         {
             if (meeting)
-                meeting->microphone = Microphone::Unknown;
+                updateMeetingStates(*meeting, result);
 
             failures.append(QString("%1: %2").arg(title, result.value("error").toString()));
             appendLog(QString("Mute All could not mute \"%1\": %2")
@@ -1532,7 +1701,7 @@ void MainWindow::onMuteAllFinished(const QJsonArray& results)
         }
 
         if (meeting)
-            meeting->microphone = Microphone::Muted;
+            updateMeetingStates(*meeting, result);
 
         if (result.value("changed").toBool())
         {
@@ -1691,7 +1860,8 @@ void MainWindow::applyDarkProfessionalTheme()
             font-weight: 700;
         }
         QPushButton#primaryButton:hover:enabled { background: #0867D8; }
-        QPushButton#secondaryButton { background: #1D3048; }
+        QPushButton#secondaryButton, QPushButton#soundButton { background: #1D3048; }
+        QWidget#meetingsContent { background: #0B1422; }
         QPushButton#dangerButton {
             color: #FCA5A5;
             background: #291D29;
@@ -1744,6 +1914,10 @@ void MainWindow::applyDarkProfessionalTheme()
         QLabel#micMuted { color: #4ADE80; font-weight: 700; }
         QLabel#micUnmuted { color: #FBBF24; font-weight: 700; }
         QLabel#micUnknown { color: #94A3B8; font-weight: 700; }
+        QLabel#soundState { font-weight: 700; }
+        QLabel#soundState[state="connected"] { color: #93C5FD; }
+        QLabel#soundState[state="disconnected"] { color: #94A3B8; }
+        QLabel#soundState[state="unknown"] { color: #FBBF24; }
         QPushButton::menu-indicator { image: none; width: 0px; }
         QMenu {
             color: #E5EDF7;

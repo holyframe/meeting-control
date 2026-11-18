@@ -173,6 +173,33 @@ void UiaWorker::setMicrophoneMuted(
     emit microphoneSet(result);
 }
 
+void UiaWorker::readAudioConnection(
+    quintptr hwndValue, const QString& tabRuntimeId,
+    const QString& tabName, const QString& requestKey)
+{
+    initialize();
+    QJsonObject result = automation_
+        ? ZoomMeetingController(automation_.Get())
+              .readAudioConnection(hwndValue, tabRuntimeId, tabName)
+        : QJsonObject{{"ok", false}, {"error", "UI Automation could not be initialized."}};
+    result.insert("requestKey", requestKey);
+    emit audioConnectionRead(result);
+}
+
+void UiaWorker::setAudioConnected(
+    quintptr hwndValue, const QString& tabRuntimeId,
+    const QString& tabName, bool connected, const QString& requestKey)
+{
+    initialize();
+    QJsonObject result = automation_
+        ? ZoomMeetingController(automation_.Get())
+              .setAudioConnected(hwndValue, tabRuntimeId, tabName, connected)
+        : QJsonObject{{"ok", false}, {"error", "UI Automation could not be initialized."}};
+    result.insert("requestKey", requestKey);
+    result.insert("requestedConnected", connected);
+    emit audioConnectionSet(result);
+}
+
 void UiaWorker::muteAll(const QJsonArray& targets)
 {
     initialize();

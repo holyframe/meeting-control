@@ -13,6 +13,8 @@ class QGridLayout;
 class QLabel;
 class QPlainTextEdit;
 class QPushButton;
+class QResizeEvent;
+class QScrollArea;
 class QStackedWidget;
 class QTabWidget;
 class QThread;
@@ -21,6 +23,7 @@ class UiaWorker;
 class MainWindow final : public QMainWindow
 {
     Q_OBJECT
+    friend class MeetingControllerTests;
 
 public:
     explicit MainWindow(QWidget* parent = nullptr);
@@ -43,6 +46,15 @@ signals:
                                 const QString& tabName,
                                 bool muted,
                                 const QString& requestKey);
+    void audioReadRequested(quintptr hwndValue,
+                            const QString& tabRuntimeId,
+                            const QString& tabName,
+                            const QString& requestKey);
+    void audioSetRequested(quintptr hwndValue,
+                           const QString& tabRuntimeId,
+                           const QString& tabName,
+                           bool connected,
+                           const QString& requestKey);
     void muteAllRequested(const QJsonArray& targets);
     void prepareImportedMeetingsRequested(const QJsonArray& targets);
 
@@ -54,6 +66,8 @@ private slots:
     void onMeetingActivated(const QJsonObject& result);
     void onMicrophoneRead(const QJsonObject& result);
     void onMicrophoneSet(const QJsonObject& result);
+    void onAudioConnectionRead(const QJsonObject& result);
+    void onAudioConnectionSet(const QJsonObject& result);
     void onMuteAllFinished(const QJsonArray& results);
     void onImportedMeetingsPrepared(const QJsonArray& results);
     void refreshChromeWindows();
@@ -64,6 +78,7 @@ private slots:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
     enum class Microphone
@@ -73,6 +88,7 @@ private:
         Unmuted,
         AudioNotConnected
     };
+    enum class Sound { Unknown, On, Off };
 
     struct ManagedMeeting
     {
@@ -85,6 +101,7 @@ private:
         QString profileName;
         int windowNumber = 0;
         Microphone microphone = Microphone::Unknown;
+        Sound sound = Sound::Unknown;
 
         QString key() const { return windowHandle + '/' + tabRuntimeId; }
         quintptr handle() const
@@ -101,13 +118,18 @@ private:
 
     QFrame* createMeetingCard(const ManagedMeeting& meeting);
     void refreshMeetingCards();
+    void layoutMeetingCards();
     void removeMeeting(const QString& key);
     void activateMeeting(const QString& key);
     void readMicrophone(const QString& key);
     void setMicrophone(const QString& key, bool muted);
+    void readSound(const QString& key);
+    void setSound(const QString& key, bool on);
     ManagedMeeting* findMeeting(const QString& key);
     void setMeetingBusy(bool busy, const QString& statusMessage);
     void applyMicrophoneResult(const QJsonObject& result, const QString& action);
+    void applyAudioResult(const QJsonObject& result, const QString& action);
+    void updateMeetingStates(ManagedMeeting& meeting, const QJsonObject& result);
 
     void navigateTo(int pageIndex);
     void appendLog(const QString& message);
@@ -160,6 +182,7 @@ private:
     QLabel* meetingCountLabel_ = nullptr;
     QLabel* meetingEmptyLabel_ = nullptr;
     QGridLayout* meetingsLayout_ = nullptr;
+    QScrollArea* meetingsArea_ = nullptr;
     QWidget* meetingEmptyCard_ = nullptr;
 
     QList<ManagedMeeting> meetings_;

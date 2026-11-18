@@ -1,119 +1,133 @@
 # Meeting Controller
 
-A native Windows C++ application that launches a dedicated Chrome profile and communicates with it through the Chrome DevTools Protocol (CDP) over inherited Windows pipes.
+**Project name:** `MeetingController`  
+**Application name:** Meeting Controller  
+**Version:** 0.4.0 — dashboard UI + Windows UI Automation feasibility build  
+**Language:** C++20  
+**UI:** Qt 6 Widgets  
+**Browser integration:** Windows UI Automation (UIA)  
+**Chrome extension:** None  
+**Chrome DevTools Protocol:** None  
+**Dedicated Chrome profile:** None
 
-**This is a Phase 0/Phase 1 feasibility starter.** It launches managed Chrome, discovers page targets, and inspects visible buttons in a selected page. It intentionally does **not** click Zoom microphone controls yet. The exact Zoom Web App DOM and mute-state semantics must be inspected and validated before enabling microphone automation.
+## UI design
 
-## Project name
+The desktop interface follows the supplied dashboard reference:
 
-`Meeting Controller`
+- A fixed left sidebar for Dashboard, Pick Up Active Meeting Tab, Refresh Chrome Windows, Mute All Meetings, Live Diagnostics, Settings, and About.
+- A dashboard with four summary cards: Total Meetings, Active Meeting, Safety Status, and UIA Connection.
+- A meeting-card area in the main workspace.
+- A dedicated Live Diagnostics page opened from the left sidebar. Diagnostics are not permanently displayed beside the dashboard.
+- A dark navy/blue visual theme with Segoe UI typography.
 
-## Current capabilities
+The meeting list starts empty. The app does not display fabricated meetings or pretend to know a Zoom microphone state.
 
-- Native Windows desktop UI using Qt 6 Widgets.
-- Launches a dedicated, persistent Chrome user-data directory.
-- Uses `--remote-debugging-pipe=asciiz` and `--remote-debugging-io-pipes` on Windows.
-- Does not expose a remote-debugging TCP port.
-- Discovers Chrome page targets through `Target.getTargets`.
-- Lets the user select a tab and inspect its visible buttons using `Runtime.evaluate`.
-- Displays the inspection result as JSON.
-- Closes the managed Chrome process when the application exits after confirmation.
+## What this build currently does
 
-## Not implemented yet
+- Enumerates visible top-level windows owned by `chrome.exe`.
+- Shows the number of detected Chrome windows on the dashboard.
+- Provides a dedicated diagnostics page with a Chrome-window selector.
+- Uses `IUIAutomation` to inspect a selected Chrome window's Control View tree.
+- Reports accessible element names, control types, automation IDs, class names, enabled/offscreen state, bounds, and availability of common control patterns.
+- Displays timestamped activity and inspection results.
+- Runs UI Automation calls on a dedicated worker thread.
+- Applies UI Automation connection/transaction timeouts where `IUIAutomation2` is available.
+- Does not launch Chrome, modify Chrome profiles, use CDP, install an extension, or change any meeting state.
 
-- Zoom microphone mute/unmute.
-- Exclusive active-meeting coordination.
-- Multi-profile / multi-Chrome-instance management.
-- Global hotkeys.
-- Speaker control.
-- Emergency microphone endpoint mute.
+## Important: current build is read-only
 
-Those features are deliberately deferred until the actual Zoom DOM and independent meeting-session behavior are validated. Blindly clicking a guessed selector would be unsafe.
+The dashboard includes the intended controls, but the following features are **not implemented yet**:
+
+- Picking up/registering the active Chrome tab as a Zoom meeting.
+- Building and persisting managed meeting cards from actual Zoom tabs.
+- Activating a selected meeting.
+- Muting or unmuting Zoom.
+- Mute All / Release Active Meeting behavior.
+
+The Pick Up Active Meeting Tab button explains this limitation when selected. Mute controls remain disabled. This is deliberate: the application must not claim a meeting is muted or unmuted unless it can read and verify the real Zoom state.
+
+## UI Automation validation gate
+
+Before implementing meeting pickup or microphone control, confirm that the user's Chrome + Zoom Web App accessibility tree exposes:
+
+1. The Chrome tab strip and currently selected `TabItem`.
+2. The active Zoom page/document.
+3. The Zoom microphone control.
+4. A reliable state indicator (for example, accessible name or `TogglePattern` state).
+5. A supported action pattern (for example, `InvokePattern` or `TogglePattern`).
+
+Do not add blind toggling or coordinate-based clicking. Any future microphone operation must read the current state, perform the action only when needed, and read the state again to verify the result.
 
 ## Requirements
 
 - Windows 10 or Windows 11, 64-bit.
-- Visual Studio 2022 with the Desktop development with C++ workload.
-- CMake 3.24 or later.
-- Qt 6.5 or later, MSVC 2022 64-bit kit.
-- Google Chrome installed.
-
-No third-party JSON library is required; the project uses Qt's JSON classes.
+- Visual Studio 2022 with **Desktop development with C++**.
+- CMake 3.24 or newer.
+- Qt 6.5 or newer, MSVC 2022 64-bit kit.
+- Google Chrome.
 
 ## Build
 
-Open a Developer PowerShell for VS 2022.
-
-Set `CMAKE_PREFIX_PATH` to your Qt MSVC installation. Example:
+Open **Developer PowerShell for Visual Studio 2022** and run:
 
 ```powershell
 cmake -S . -B build -DCMAKE_PREFIX_PATH="C:\Qt\6.8.3\msvc2022_64"
 cmake --build build --config Release
 ```
 
-Run:
+Change the Qt path to the location and version installed on your machine. The build uses the MSVC 2022 64-bit Qt kit.
+
+Run the application:
 
 ```powershell
 .\build\Release\MeetingController.exe
 ```
 
-If your Qt installation is in a different location, change `CMAKE_PREFIX_PATH`.
+## First test
 
-## First run
+1. Open Chrome normally using your existing profile.
+2. Join one Zoom meeting in Chrome.
+3. Start Meeting Controller.
+4. Wait for the UIA status in the lower-left sidebar to show **UIA Ready**.
+5. Click **Live Diagnostics** in the left sidebar.
+6. Click **Refresh** to enumerate visible Chrome windows.
+7. Select the Chrome window containing the Zoom meeting.
+8. Click **Inspect Selected Window**.
+9. Review the **Accessibility Tree** tab.
+10. Look for `TabItem`, `Document`, and button nodes related to Zoom audio/microphone controls.
 
-1. Start Meeting Controller.
-2. Click **Launch Managed Chrome**.
-3. Chrome opens with a dedicated profile under the current user's local application data directory:
-   `%LOCALAPPDATA%\MeetingController\chrome-profile`
-4. Sign in to Zoom in this managed Chrome profile if needed.
-5. Join a test meeting.
-6. Return to Meeting Controller and click **Refresh Tabs**.
-7. Select the Zoom tab.
-8. Click **Inspect Selected Tab**.
-9. Review the JSON inventory of visible buttons in the output panel.
+The selector lists Chrome windows, not individual tabs. The app does not yet select or register a tab.
 
-The application does not use your normal Chrome profile. This is intentional: Chrome 136+ requires remote debugging to use a non-default user-data directory.
+## What to share for the next implementation phase
 
-## Important behavior
+Share the diagnostics output for the Chrome window containing the live Zoom meeting. If the output is large, include the sections around:
 
-- Use the Chrome window launched by Meeting Controller for meetings you want it to manage.
-- Existing Chrome windows that were launched normally are not controlled by this starter.
-- The dedicated Chrome profile persists between runs, but the managed browser process is closed when Meeting Controller exits.
-- Closing the managed browser disconnects meetings open in that browser. The app asks for confirmation first.
-- A separate Chrome profile does not bypass Zoom's simultaneous-meeting/account restrictions.
+- Chrome's tab strip and `TabItem` elements.
+- The web content `Document` element.
+- Buttons whose names mention microphone, mute, audio, or unmute.
 
-## CDP pipe details
+Redact meeting titles, participant names, and other private details before sharing.
 
-On Windows, Chromium accepts two inherited handles through:
+## Known limitations
 
-```text
---remote-debugging-pipe=asciiz
---remote-debugging-io-pipes=<browser-read-handle>,<browser-write-handle>
-```
+- Chrome's UIA provider exposes accessibility data, not the complete DOM.
+- UIA may expose the browser tab strip and only the active tab's page content. Background-tab page controls may not be available until that tab is selected. This must be tested on the actual Chrome build.
+- UIA control patterns vary by element. A visible button may expose `InvokePattern`, `LegacyIAccessiblePattern`, or no actionable pattern.
+- The accessibility tree can change with Chrome and Zoom updates.
+- UIA cannot bypass Zoom's server-side simultaneous-meeting restrictions.
+- This build discovers top-level Chrome windows only; it does not yet pick up individual tabs or control microphones.
 
-The application creates two anonymous pipes and passes only the child-side handles using `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. The parent communicates with Chrome using the remaining pipe ends. Each CDP JSON message is terminated with a NUL byte.
+## Source layout
 
-This is based on Chromium's Windows ChromeDriver pipe setup:
-- https://chromium.googlesource.com/chromium/src/+/main/chrome/test/chromedriver/net/pipe_builder.cc
-- https://chromium.googlesource.com/chromium/src/+/main/content/public/common/content_switches.cc
+- `src/MainWindow.*` — Qt dashboard, left sidebar, dedicated diagnostics/settings/about pages.
+- `src/ChromeWindowEnumerator.*` — Win32 enumeration of visible Chrome top-level windows.
+- `src/UiaWorker.*` — COM/UIA worker thread and initialization.
+- `src/UiaTreeInspector.*` — bounded Control View tree inspection and JSON serialization.
+- `src/main.cpp` — Qt application entry point.
 
-Chrome remote debugging security change:
-- https://developer.chrome.com/blog/remote-debugging-port
+## References
 
-## Safety note
-
-CDP is a powerful browser-control interface. This application intentionally uses a dedicated profile and inherited pipes instead of opening a remote-debugging TCP port. Do not change this to `--remote-debugging-port=9222` or expose a DevTools endpoint to your network.
-
-The button inventory is read-only. Do not enable microphone automation until the Zoom button's labels, state transitions, and behavior have been verified against the exact Zoom Web App version in use.
-
-## Next development milestone
-
-Capture the button inventory from a real Zoom meeting in the managed Chrome profile. Use that evidence to implement a versioned `ZoomWebAdapter` that:
-
-1. Identifies the actual microphone control.
-2. Reads muted/unmuted state without guessing.
-3. Sets an explicit desired state rather than toggling blindly.
-4. Verifies the resulting state.
-5. Fails closed when state is unknown.
-
-Only after that should the `AudioCoordinator` and multi-meeting safety state machine be implemented.
+- Microsoft UI Automation: https://learn.microsoft.com/windows/win32/winauto/entry-uiauto-win32
+- Obtaining UI Automation elements: https://learn.microsoft.com/windows/win32/winauto/uiauto-obtainingelements
+- Chrome Windows UIA support: https://developer.chrome.com/blog/windows-uia-support-update
+- Chromium UIA provider documentation: https://chromium.googlesource.com/chromium/src/+/main/docs/accessibility/browser/uiautomation.md

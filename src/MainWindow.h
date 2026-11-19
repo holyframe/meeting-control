@@ -1,10 +1,13 @@
 #pragma once
 
+#include "MeetingBatch.h"
+
 #include <QMainWindow>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
 #include <QString>
+#include <QStringList>
 
 class QCloseEvent;
 class QComboBox;
@@ -55,9 +58,6 @@ signals:
                            const QString& tabName,
                            bool connected,
                            const QString& requestKey);
-    void muteAllRequested(const QJsonArray& targets);
-    void soundOffAllRequested(const QJsonArray& targets);
-    void refreshConnectionsRequested(const QJsonArray& targets);
     void prepareImportedMeetingsRequested(const QJsonArray& targets);
 
 private slots:
@@ -70,9 +70,8 @@ private slots:
     void onMicrophoneSet(const QJsonObject& result);
     void onAudioConnectionRead(const QJsonObject& result);
     void onAudioConnectionSet(const QJsonObject& result);
-    void onMuteAllFinished(const QJsonArray& results);
-    void onSoundOffAllFinished(const QJsonArray& results);
-    void onRefreshConnectionsFinished(const QJsonArray& results);
+    void onBatchMeetingFinished(const QJsonObject& result);
+    void onBatchFinished(int skipped);
     void onImportedMeetingsPrepared(const QJsonArray& results);
     void refreshChromeWindows();
     void inspectSelectedWindow();
@@ -126,6 +125,8 @@ private:
 
     QFrame* createMeetingCard(const ManagedMeeting& meeting);
     void refreshMeetingCards();
+    void refreshBatchCard(const QString& previousKey, const ManagedMeeting& meeting);
+    void updateMeetingCounts();
     void layoutMeetingCards();
     void removeMeeting(const QString& key);
     void moveMeeting(const QString& fromKey, const QString& toKey);
@@ -136,6 +137,7 @@ private:
     void setSound(const QString& key, bool on);
     ManagedMeeting* findMeeting(const QString& key);
     void setMeetingBusy(bool busy, const QString& statusMessage);
+    void startMeetingBatch(MeetingBatch::Operation operation);
     void applyMicrophoneResult(const QJsonObject& result, const QString& action);
     void applyAudioResult(const QJsonObject& result, const QString& action);
     void updateMeetingStates(ManagedMeeting& meeting, const QJsonObject& result);
@@ -154,6 +156,11 @@ private:
 
     QThread* workerThread_ = nullptr;
     UiaWorker* worker_ = nullptr;
+    MeetingBatch* batch_ = nullptr;
+    MeetingBatch::Operation batchOperation_ = MeetingBatch::Operation::Refresh;
+    int batchChanged_ = 0;
+    int batchAlready_ = 0;
+    QStringList batchFailures_;
 
     QWidget* dashboardPage_ = nullptr;
     QWidget* diagnosticsPage_ = nullptr;
@@ -170,6 +177,8 @@ private:
     QPushButton* dashboardMuteAllButton_ = nullptr;
     QPushButton* dashboardSoundOffButton_ = nullptr;
     QPushButton* uiaRefreshButton_ = nullptr;
+    QLabel* batchProgress_ = nullptr;
+    QPushButton* cancelRemaining_ = nullptr;
 
     QPushButton* inspectButton_ = nullptr;
     QComboBox* chromeWindowCombo_ = nullptr;

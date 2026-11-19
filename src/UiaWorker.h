@@ -45,9 +45,6 @@ public slots:
                            const QString& tabName,
                            bool connected,
                            const QString& requestKey);
-    void muteAll(const QJsonArray& targets);
-    void soundOffAll(const QJsonArray& targets);
-    void refreshConnections(const QJsonArray& targets);
     void prepareImportedMeetings(const QJsonArray& targets);
     void shutdown();
 
@@ -61,9 +58,6 @@ signals:
     void microphoneSet(const QJsonObject& result);
     void audioConnectionRead(const QJsonObject& result);
     void audioConnectionSet(const QJsonObject& result);
-    void muteAllFinished(const QJsonArray& results);
-    void soundOffAllFinished(const QJsonArray& results);
-    void refreshConnectionsFinished(const QJsonArray& results);
     void importedMeetingsPrepared(const QJsonArray& results);
     void diagnostic(const QString& message);
 

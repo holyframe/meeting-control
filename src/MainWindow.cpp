@@ -201,18 +201,27 @@ MainWindow::MainWindow(QWidget* parent)
             worker_, &UiaWorker::setAudioConnected, Qt::QueuedConnection);
     connect(worker_, &UiaWorker::audioConnectionSet,
             this, &MainWindow::onAudioConnectionSet, Qt::QueuedConnection);
-    connect(this, &MainWindow::muteAllRequested,
-            worker_, &UiaWorker::muteAll, Qt::QueuedConnection);
-    connect(worker_, &UiaWorker::muteAllFinished,
-            this, &MainWindow::onMuteAllFinished, Qt::QueuedConnection);
-    connect(this, &MainWindow::soundOffAllRequested,
-            worker_, &UiaWorker::soundOffAll, Qt::QueuedConnection);
-    connect(worker_, &UiaWorker::soundOffAllFinished,
-            this, &MainWindow::onSoundOffAllFinished, Qt::QueuedConnection);
-    connect(this, &MainWindow::refreshConnectionsRequested,
-            worker_, &UiaWorker::refreshConnections, Qt::QueuedConnection);
-    connect(worker_, &UiaWorker::refreshConnectionsFinished,
-            this, &MainWindow::onRefreshConnectionsFinished, Qt::QueuedConnection);
+    batch_ = new MeetingBatch(this);
+    connect(batch_, &MeetingBatch::meetingStarted, this, [this](int number, int total, const QString& key) {
+        const auto* meeting = findMeeting(key);
+        const QString progress = QString("Checking meeting %1 of %2").arg(number).arg(total);
+        batchProgress_->setText(progress);
+        batchProgress_->setToolTip(meeting ? meeting->title : QString());
+        batchProgress_->show();
+        cancelRemaining_->setEnabled(number < total);
+        cancelRemaining_->show();
+        statusBar()->showMessage(meeting ? progress + " · " + meeting->title : progress);
+    });
+    connect(batch_, &MeetingBatch::meetingFinished, this, &MainWindow::onBatchMeetingFinished);
+    connect(batch_, &MeetingBatch::finished, this, &MainWindow::onBatchFinished);
+    connect(batch_, &MeetingBatch::initialized, this, &MainWindow::onInitialized);
+    connect(batch_, &MeetingBatch::diagnostic, this, &MainWindow::appendLog);
+    connect(cancelRemaining_, &QPushButton::clicked, this, [this] {
+        batch_->cancelRemaining();
+        cancelRemaining_->setEnabled(false);
+        batchProgress_->setText("Finishing the current meeting");
+        appendLog("Cancelled the remaining meetings in this batch.");
+    });
     connect(this, &MainWindow::prepareImportedMeetingsRequested,
             worker_, &UiaWorker::prepareImportedMeetings, Qt::QueuedConnection);
     connect(worker_, &UiaWorker::importedMeetingsPrepared,
@@ -244,6 +253,7 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow()
 {
+    delete batch_;
     if (workerThread_ && workerThread_->isRunning())
     {
         if (worker_)
@@ -341,6 +351,15 @@ QWidget* MainWindow::createDashboardPage()
     meetingHeader->addWidget(meetingTitle);
     meetingHeader->addWidget(meetingCountLabel_);
     meetingHeader->addStretch();
+    batchProgress_ = new QLabel(page);
+    batchProgress_->setObjectName("batchProgress");
+    batchProgress_->hide();
+    meetingHeader->addWidget(batchProgress_);
+    cancelRemaining_ = new QPushButton("Cancel remaining", page);
+    cancelRemaining_->setObjectName("secondaryButton");
+    cancelRemaining_->setToolTip("Finish the current meeting and skip the remaining meetings.");
+    cancelRemaining_->hide();
+    meetingHeader->addWidget(cancelRemaining_);
     layout->addLayout(meetingHeader);
 
     auto* meetingsArea = new QScrollArea(page);
@@ -601,7 +620,8 @@ void MainWindow::updateUiaStatus(bool ready, const QString& message)
         ? "Windows UI Automation initialized"
         : "Initialization failed");
 
-    statusBar()->showMessage(message);
+    if (batchProgress_->isHidden())
+        statusBar()->showMessage(message);
     appendLog(message);
 }
 
@@ -868,7 +888,7 @@ QList<int> askTabsToImport(QWidget* parent, const QJsonArray& tabs)
 
 void MainWindow::requestMeetingTabImport()
 {
-    if (pickupInProgress_)
+    if (pickupInProgress_ || meetingBusy_)
         return;
 
     pickupInProgress_ = true;
@@ -1253,16 +1273,7 @@ void MainWindow::refreshMeetingCards()
         meetingCards_.append(card);
     }
     layoutMeetingCards();
-
-    const int totalCount = meetings_.size();
-    const int activeCount = static_cast<int>(std::count_if(
-        meetings_.cbegin(), meetings_.cend(),
-        [this](const ManagedMeeting& meeting) { return meetingCardIsActive(meeting); }));
-    meetingCountValue_->setText(QString("%1/%2").arg(activeCount).arg(totalCount));
-    meetingCountDetail_->setText(totalCount == 0
-        ? "No meetings picked up yet"
-        : "Active / total");
-    meetingCountLabel_->setText(QString::number(totalCount));
+    updateMeetingCounts();
 
     const bool canUseMeetings = !meetings_.isEmpty() && !meetingBusy_;
     dashboardMuteAllButton_->setEnabled(canUseMeetings);
@@ -1281,6 +1292,32 @@ void MainWindow::refreshMeetingCards()
         ? QString("Pick up a meeting tab first.")
         : QString("Leaves computer audio for every meeting. Sound turns off and the microphone disconnects. "
                   "Chrome switches to each meeting tab."));
+}
+
+void MainWindow::updateMeetingCounts()
+{
+    const auto active = std::count_if(meetings_.cbegin(), meetings_.cend(),
+        [this](const ManagedMeeting& meeting) { return meetingCardIsActive(meeting); });
+    meetingCountValue_->setText(QString("%1/%2").arg(active).arg(meetings_.size()));
+    meetingCountDetail_->setText(meetings_.isEmpty() ? "No meetings picked up yet" : "Active / total");
+    meetingCountLabel_->setText(QString::number(meetings_.size()));
+}
+
+void MainWindow::refreshBatchCard(const QString& previousKey, const ManagedMeeting& meeting)
+{
+    for (QFrame*& card : meetingCards_)
+    {
+        if (card->property("meetingKey").toString() != previousKey)
+            continue;
+        QFrame* replacement = createMeetingCard(meeting);
+        delete meetingsLayout_->replaceWidget(card, replacement);
+        card->hide();
+        card->deleteLater();
+        card = replacement;
+        replacement->show();
+        break;
+    }
+    updateMeetingCounts();
 }
 
 MainWindow::ManagedMeeting* MainWindow::findMeeting(const QString& key)
@@ -1741,255 +1778,119 @@ void MainWindow::onAudioConnectionSet(const QJsonObject& result)
 
 void MainWindow::requestRefreshConnections()
 {
-    if (meetings_.isEmpty() || meetingBusy_)
-        return;
-
-    QJsonArray targets;
-    for (const ManagedMeeting& meeting : std::as_const(meetings_))
-    {
-        targets.append(QJsonObject{
-            {"windowHandle", meeting.windowHandle},
-            {"tabRuntimeId", meeting.tabRuntimeId},
-            {"tabName", meeting.automationName()},
-            {"requestKey", meeting.key()}
-        });
-    }
-
-    appendLog(QString("Checking computer-audio connection for %1 meeting(s).").arg(targets.size()));
-    setMeetingBusy(true, "Checking each meeting's computer-audio connection...");
-    emit refreshConnectionsRequested(targets);
-}
-
-void MainWindow::onRefreshConnectionsFinished(const QJsonArray& results)
-{
-    QStringList failures;
-    for (const QJsonValue& value : results)
-    {
-        const QJsonObject result = value.toObject();
-        ManagedMeeting* meeting = findMeeting(result.value("requestKey").toString());
-        const QString audioState = result.value("audioState").toString();
-        const bool verified = result.value("ok").toBool() && result.value("verified").toBool()
-            && (audioState == "connected" || audioState == "disconnected");
-
-        if (!meeting)
-        {
-            const QString error = result.value("error").toString();
-            if (!error.isEmpty())
-                failures.append(error);
-            continue;
-        }
-
-        QJsonObject observation = result;
-        observation.insert("ok", verified);
-        updateMeetingStates(*meeting, observation);
-
-        if (verified)
-        {
-            appendLog(QString("\"%1\" computer audio is %2.")
-                          .arg(meeting->title, audioState == "connected" ? "connected" : "ready to join"));
-        }
-        else
-        {
-            const QString error = result.value("error").toString("The connection could not be read.");
-            failures.append(QString("%1: %2").arg(meeting->title, error));
-            appendLog(QString("Could not check \"%1\": %2").arg(meeting->title, error));
-        }
-    }
-
-    const int activeCount = static_cast<int>(std::count_if(
-        meetings_.cbegin(), meetings_.cend(),
-        [this](const ManagedMeeting& meeting) { return meetingCardIsActive(meeting); }));
-    setMeetingBusy(false, QString("Connection check · %1/%2 active")
-                               .arg(activeCount)
-                               .arg(meetings_.size()));
-
-    if (!failures.isEmpty())
-    {
-        QMessageBox::warning(
-            this,
-            "Some connections could not be checked",
-            failures.join("\n\n"));
-    }
+    startMeetingBatch(MeetingBatch::Operation::Refresh);
 }
 
 void MainWindow::requestSoundOffAll()
 {
-    if (meetings_.isEmpty() || meetingBusy_)
-        return;
-
-    const int answer = QMessageBox::question(
-        this,
-        "Sound off all meetings",
-        QString("Turn sound off for %1 managed meeting(s)?\n\n"
-                "Each meeting leaves computer audio. The microphone disconnects as well. "
-                "Chrome switches tabs while this runs.")
-            .arg(meetings_.size()),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::Yes);
-
-    if (answer != QMessageBox::Yes)
-        return;
-
-    QJsonArray targets;
-    for (const ManagedMeeting& meeting : std::as_const(meetings_))
-    {
-        targets.append(QJsonObject{
-            {"windowHandle", meeting.windowHandle},
-            {"tabRuntimeId", meeting.tabRuntimeId},
-            {"tabName", meeting.automationName()},
-            {"requestKey", meeting.key()}
-        });
-    }
-
-    appendLog(QString("Sound Off All requested for %1 meeting(s).").arg(targets.size()));
-    setMeetingBusy(true, "Turning sound off for every managed meeting...");
-    emit soundOffAllRequested(targets);
-}
-
-void MainWindow::onSoundOffAllFinished(const QJsonArray& results)
-{
-    int turnedOff = 0;
-    int alreadyOff = 0;
-    QStringList failures;
-
-    for (const QJsonValue& value : results)
-    {
-        const QJsonObject result = value.toObject();
-        ManagedMeeting* meeting = findMeeting(result.value("requestKey").toString());
-        const QString title = meeting ? meeting->title : QString("A meeting");
-        const QString audioState = result.value("audioState").toString();
-        const bool verified = result.value("ok").toBool() && result.value("verified").toBool()
-            && audioState == "disconnected";
-
-        if (!meeting)
-        {
-            const QString error = result.value("error").toString("The connection could not be changed.");
-            if (!error.isEmpty())
-                failures.append(error);
-            continue;
-        }
-
-        QJsonObject observation = result;
-        observation.insert("ok", verified);
-        updateMeetingStates(*meeting, observation);
-
-        if (!verified)
-        {
-            const QString error = result.value("error").toString("Sound could not be turned off.");
-            failures.append(QString("%1: %2").arg(title, error));
-            appendLog(QString("Sound Off All could not turn off \"%1\": %2").arg(title, error));
-            continue;
-        }
-
-        if (result.value("changed").toBool())
-        {
-            ++turnedOff;
-            appendLog(QString("Sound Off All turned sound off for \"%1\".").arg(title));
-        }
-        else
-        {
-            ++alreadyOff;
-            appendLog(QString("Sound Off All left \"%1\" with sound off; it already was.").arg(title));
-        }
-    }
-
-    setMeetingBusy(false,
-        QString("Sound Off All · %1 turned off, %2 already off, %3 failed")
-            .arg(turnedOff).arg(alreadyOff).arg(failures.size()));
-
-    if (!failures.isEmpty())
-    {
-        QMessageBox::warning(
-            this,
-            "Some meetings could not turn sound off",
-            failures.join("\n\n"));
-    }
+    startMeetingBatch(MeetingBatch::Operation::SoundOff);
 }
 
 void MainWindow::requestMuteAll()
 {
-    if (meetings_.isEmpty() || meetingBusy_)
-        return;
+    startMeetingBatch(MeetingBatch::Operation::Mute);
+}
 
-    const int answer = QMessageBox::question(
-        this,
-        "Mute all meetings",
-        QString("Mute %1 managed meeting(s)?\n\n"
-                "Each meeting tab has to be on screen in its Chrome window to be "
-                "controlled, so Chrome will switch tabs while this runs.")
-            .arg(meetings_.size()),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::Yes);
-
-    if (answer != QMessageBox::Yes)
+void MainWindow::startMeetingBatch(MeetingBatch::Operation operation)
+{
+    if (meetings_.isEmpty() || meetingBusy_ || pickupInProgress_)
         return;
 
     QJsonArray targets;
     for (const ManagedMeeting& meeting : std::as_const(meetings_))
     {
         targets.append(QJsonObject{
-            {"windowHandle", meeting.windowHandle},
-            {"tabRuntimeId", meeting.tabRuntimeId},
-            {"tabName", meeting.automationName()},
-            {"requestKey", meeting.key()}
+            {"windowHandle", meeting.windowHandle}, {"tabRuntimeId", meeting.tabRuntimeId},
+            {"tabName", meeting.automationName()}, {"requestKey", meeting.key()}
         });
     }
-
-    appendLog(QString("Mute All requested for %1 meeting(s).").arg(targets.size()));
-    setMeetingBusy(true, "Muting every managed meeting...");
-    emit muteAllRequested(targets);
+    batchOperation_ = operation;
+    batchChanged_ = 0;
+    batchAlready_ = 0;
+    batchFailures_.clear();
+    const QString action = operation == MeetingBatch::Operation::Mute ? "Mute All"
+        : operation == MeetingBatch::Operation::SoundOff ? "Sound Off All" : "Connection check";
+    const QString message = QString("%1 · %2 meeting(s)").arg(action).arg(targets.size());
+    appendLog(message);
+    setMeetingBusy(true, message);
+    batch_->start(operation, targets);
 }
 
-void MainWindow::onMuteAllFinished(const QJsonArray& results)
+void MainWindow::onBatchMeetingFinished(const QJsonObject& result)
 {
-    int muted = 0;
-    int alreadyMuted = 0;
-    QStringList failures;
-
-    for (const QJsonValue& value : results)
+    const QString key = result.value("requestKey").toString();
+    ManagedMeeting* meeting = findMeeting(key);
+    const QString title = meeting ? meeting->title : QStringLiteral("Meeting");
+    const QString audio = result.value("audioState").toString();
+    bool verified = result.value("ok").toBool() && result.value("verified").toBool();
+    QString state;
+    switch (batchOperation_)
     {
-        const QJsonObject result = value.toObject();
-        const QString key = result.value("requestKey").toString();
-        ManagedMeeting* meeting = findMeeting(key);
-        const QString title = meeting ? meeting->title : QString("A meeting");
+    case MeetingBatch::Operation::Mute:
+        verified = verified && result.value("state").toString() == "muted";
+        state = "muted";
+        break;
+    case MeetingBatch::Operation::SoundOff:
+        verified = verified && audio == "disconnected";
+        state = "sound off";
+        break;
+    case MeetingBatch::Operation::Refresh:
+        verified = verified && (audio == "connected" || audio == "disconnected");
+        state = audio == "connected" ? "computer audio connected" : "ready to join computer audio";
+        break;
+    }
 
-        if (!result.value("ok").toBool())
-        {
-            if (meeting)
-                updateMeetingStates(*meeting, result);
-
-            failures.append(QString("%1: %2").arg(title, result.value("error").toString()));
-            appendLog(QString("Mute All could not mute \"%1\": %2")
-                          .arg(title, result.value("error").toString()));
-            continue;
-        }
-
-        if (meeting)
-            updateMeetingStates(*meeting, result);
-
-        if (result.value("changed").toBool())
-        {
-            ++muted;
-            appendLog(QString("Mute All muted \"%1\".").arg(title));
-        }
+    if (meeting)
+    {
+        QJsonObject observation = result;
+        observation.insert("ok", verified);
+        updateMeetingStates(*meeting, observation);
+        refreshBatchCard(key, *meeting);
+    }
+    if (verified)
+    {
+        const bool changed = result.value("changed").toBool();
+        if (changed)
+            ++batchChanged_;
         else
-        {
-            ++alreadyMuted;
-            appendLog(QString("Mute All left \"%1\" muted; it already was.").arg(title));
-        }
+            ++batchAlready_;
+        if (!changed && batchOperation_ != MeetingBatch::Operation::Refresh)
+            state.prepend("already ");
+        appendLog(title + " · " + state);
     }
-
-    setMeetingBusy(false,
-        QString("Mute All · %1 muted, %2 already muted, %3 failed")
-            .arg(muted).arg(alreadyMuted).arg(failures.size()));
-
-    if (!failures.isEmpty())
+    else
     {
-        QMessageBox::warning(
-            this,
-            "Some meetings could not be muted",
-            failures.join("\n\n"));
+        const QString failure = title + " · " + result.value("error").toString("The state could not be verified.");
+        batchFailures_.append(failure);
+        appendLog(failure);
     }
+}
+
+void MainWindow::onBatchFinished(int skipped)
+{
+    batchProgress_->hide();
+    cancelRemaining_->hide();
+    QString summary;
+    switch (batchOperation_)
+    {
+    case MeetingBatch::Operation::Mute:
+        summary = QString("Mute All · %1 muted, %2 already muted").arg(batchChanged_).arg(batchAlready_);
+        break;
+    case MeetingBatch::Operation::SoundOff:
+        summary = QString("Sound Off All · %1 turned off, %2 already off").arg(batchChanged_).arg(batchAlready_);
+        break;
+    case MeetingBatch::Operation::Refresh:
+        summary = QString("Connection check · %1 verified · %2 active")
+            .arg(batchChanged_ + batchAlready_).arg(meetingCountValue_->text());
+        break;
+    }
+    summary += QString(", %1 failed").arg(batchFailures_.size());
+    if (skipped > 0)
+        summary += QString(", %1 skipped").arg(skipped);
+    appendLog(summary);
+    setMeetingBusy(false, summary);
+    if (!batchFailures_.isEmpty())
+        QMessageBox::warning(this, "Some meetings could not be verified", batchFailures_.join("\n\n"));
 }
 
 void MainWindow::appendLog(const QString& message)

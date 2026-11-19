@@ -5,21 +5,61 @@
 #include <QApplication>
 #include <QFrame>
 #include <QFontDatabase>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QProcess>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalSpy>
+#include <QStatusBar>
 #include <QTest>
 #include <QTimer>
+
+#include <cstring>
+#include <iostream>
+#include <string>
 
 using zoomAudio::Action;
 using zoomAudio::Connection;
 
 namespace
 {
+// The test executable acts as its own worker so the real scheduler, pipes,
+// and process deadlines can be exercised without opening a Chrome tab.
+int runTestBatchWorker()
+{
+    std::string line;
+    while (std::getline(std::cin, line))
+    {
+        const auto request = QJsonDocument::fromJson(QByteArray::fromStdString(line)).object();
+        const QString id = request.value("tabRuntimeId").toString();
+        if (id == "exit")
+            return 7;
+        if (id == "stall")
+        {
+            std::getline(std::cin, line);
+            return 0;
+        }
+        const auto operation = static_cast<MeetingBatch::Operation>(request.value("operation").toInt());
+        const bool off = operation == MeetingBatch::Operation::SoundOff;
+        QJsonObject result{
+            {"requestKey", id == "wrong-key" ? QJsonValue("different-meeting") : request.value("requestKey")},
+            {"ok", true}, {"verified", true}, {"changed", !id.startsWith("already")},
+            {"state", off ? "audioNotConnected" : "muted"}, {"fixturePid", QCoreApplication::applicationPid()}
+        };
+        if (operation != MeetingBatch::Operation::Mute)
+            result.insert("audioState", off ? "disconnected" : "connected");
+        if (id == "new-id")
+            result.insert("tabRuntimeId", "resolved-tab");
+        const QJsonObject message{{"type", "result"}, {"result", result}};
+        std::cout << QJsonDocument(message).toJson(QJsonDocument::Compact).constData() << '\n' << std::flush;
+    }
+    return 0;
+}
+
 struct FakeAudio
 {
     QList<QStringList> frames;
@@ -561,15 +601,202 @@ private slots:
     void refreshChecksEveryMeetingConnection()
     {
         MainWindow window;
-        populate(window, MainWindow::Sound::On, MainWindow::Microphone::Muted);
+        populate(window, MainWindow::Sound::Unknown, MainWindow::Microphone::Unknown);
         auto second = window.meetings_.first();
-        second.tabRuntimeId = "second-tab";
+        window.meetings_.first().tabRuntimeId = "new-id";
+        second.tabRuntimeId = "second";
         second.title = "Second meeting";
         window.meetings_.append(second);
-        QSignalSpy spy(&window, &MainWindow::refreshConnectionsRequested);
+        QSignalSpy started(window.batch_, &MeetingBatch::meetingStarted);
+        QSignalSpy results(window.batch_, &MeetingBatch::meetingFinished);
+        QSignalSpy done(window.batch_, &MeetingBatch::finished);
+        QSignalSpy pickup(&window, &MainWindow::pickupRequested);
+        QFrame* secondCard = nullptr;
+        connect(window.batch_, &MeetingBatch::meetingFinished, this, [&](const QJsonObject& result) {
+            if (result.value("requestKey").toString() != "1234/new-id")
+                return;
+            QVERIFY(window.meetingBusy_);
+            QCOMPARE(window.meetingCountValue_->text(), "1/2");
+            QCOMPARE(window.meetingCards_.first()->property("meetingKey").toString(), "1234/resolved-tab");
+            QCOMPARE(window.meetingCards_.first()->findChild<QLabel*>("soundState")->text(), "Sound on");
+            QCOMPARE(window.meetingCards_.at(1), secondCard);
+            QCOMPARE(window.meetings_.at(1).sound, MainWindow::Sound::Unknown);
+        });
         window.uiaRefreshButton_->click();
-        QCOMPARE(spy.count(), 1);
-        QCOMPARE(spy.first().at(0).toJsonArray().size(), 2);
+        secondCard = window.meetingCards_.at(1);
+        QCOMPARE(window.batchProgress_->text(), "Checking meeting 1 of 2");
+        QVERIFY(!window.cancelRemaining_->isHidden());
+        window.requestRefreshConnections();
+        window.requestMeetingTabImport();
+        QCOMPARE(pickup.size(), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 5000);
+        QCOMPARE(started.size(), 2);
+        QCOMPARE(started.at(1).at(2).toString(), second.key());
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results.first().first().toJsonObject().value("fixturePid"),
+                 results.last().first().toJsonObject().value("fixturePid"));
+        QCOMPARE(window.meetingCountValue_->text(), "2/2");
+        QVERIFY(window.batchProgress_->isHidden());
+        QVERIFY(window.uiaRefreshButton_->isEnabled());
+        QVERIFY(window.statusBar()->currentMessage().contains("2 verified"));
+    }
+
+    void cancelRemainingFinishesCurrentAndSkipsTheRest_data()
+    {
+        QTest::addColumn<bool>("mute");
+        QTest::newRow("Mute All") << true;
+        QTest::newRow("Sound Off All") << false;
+    }
+
+    void cancelRemainingFinishesCurrentAndSkipsTheRest()
+    {
+        QFETCH(bool, mute);
+        MainWindow window;
+        populate(window, MainWindow::Sound::On, MainWindow::Microphone::Unmuted);
+        auto next = window.meetings_.first();
+        next.tabRuntimeId = "already";
+        next.microphone = MainWindow::Microphone::Muted;
+        if (!mute)
+            next.sound = MainWindow::Sound::Off;
+        window.meetings_.append(next);
+        auto skipped = window.meetings_.first();
+        skipped.tabRuntimeId = "skipped";
+        window.meetings_.append(skipped);
+        window.refreshMeetingCards();
+
+        QSignalSpy started(window.batch_, &MeetingBatch::meetingStarted);
+        QSignalSpy results(window.batch_, &MeetingBatch::meetingFinished);
+        QSignalSpy done(window.batch_, &MeetingBatch::finished);
+        const auto cancelClick = connect(window.batch_, &MeetingBatch::meetingStarted, this, [&](int number, int total, const QString&) {
+            if (number != 2)
+                return;
+            QCOMPARE(total, 3);
+            QCOMPARE(window.batchProgress_->text(), "Checking meeting 2 of 3");
+            window.cancelRemaining_->click();
+            QVERIFY(!window.cancelRemaining_->isEnabled());
+            QVERIFY(window.meetingBusy_);
+        });
+        // Dismiss an unexpected prompt so the one-click assertion can report the regression.
+        QTimer::singleShot(0, &window, [] {
+            if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))
+                dialog->reject();
+        });
+        (mute ? window.dashboardMuteAllButton_ : window.dashboardSoundOffButton_)->click();
+        QCOMPARE(started.size(), 1);
+        QVERIFY(!QApplication::activeModalWidget());
+        QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 5000);
+        QCOMPARE(done.first().first().toInt(), 1);
+        QCOMPARE(started.size(), 2);
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results.last().first().toJsonObject().value("requestKey").toString(), next.key());
+        QCOMPARE(window.meetings_.first().microphone, mute ? MainWindow::Microphone::Muted
+                                                           : MainWindow::Microphone::AudioNotConnected);
+        QCOMPARE(window.meetings_.first().sound, mute ? MainWindow::Sound::On : MainWindow::Sound::Off);
+        QCOMPARE(window.meetings_.last().sound, skipped.sound);
+        QCOMPARE(window.meetings_.last().microphone, skipped.microphone);
+        QVERIFY(window.statusBar()->currentMessage().contains(mute ? "1 muted, 1 already muted"
+                                                                  : "1 turned off, 1 already off"));
+        QVERIFY(window.statusBar()->currentMessage().contains("0 failed, 1 skipped"));
+        QVERIFY(!window.meetingBusy_);
+        QVERIFY(window.cancelRemaining_->isHidden());
+        QVERIFY(window.dashboardMuteAllButton_->isEnabled());
+
+        disconnect(cancelClick);
+        window.uiaRefreshButton_->click();
+        QTRY_COMPARE_WITH_TIMEOUT(done.size(), 2, 5000);
+        QCOMPARE(done.last().first().toInt(), 0);
+        QCOMPARE(results.size(), 5);
+        QCOMPARE(results.last().first().toJsonObject().value("requestKey").toString(), skipped.key());
+    }
+
+    void batchRecoversFromWorkerFailure_data()
+    {
+        QTest::addColumn<QString>("fault");
+        QTest::newRow("native call stalls") << QString("stall");
+        QTest::newRow("worker exits") << QString("exit");
+        QTest::newRow("mismatched meeting key") << QString("wrong-key");
+    }
+
+    void batchRecoversFromWorkerFailure()
+    {
+        QFETCH(QString, fault);
+        MainWindow window;
+        populate(window, MainWindow::Sound::On, MainWindow::Microphone::Muted);
+        window.meetings_.first().tabRuntimeId = fault;
+        window.refreshMeetingCards();
+        MeetingBatch batch(nullptr, 1200);
+        const QString failedKey = window.meetings_.first().key();
+        connect(&batch, &MeetingBatch::meetingFinished, &window, [&](const QJsonObject& result) {
+            if (result.value("requestKey").toString() == failedKey)
+                window.onBatchMeetingFinished(result);
+        });
+        QSignalSpy started(&batch, &MeetingBatch::meetingStarted);
+        QSignalSpy results(&batch, &MeetingBatch::meetingFinished);
+        QSignalSpy done(&batch, &MeetingBatch::finished);
+        QJsonArray targets;
+        for (const QString& id : QStringList{"first", fault, "last"})
+            targets.append(QJsonObject{{"requestKey", "1234/" + id}, {"tabRuntimeId", id}});
+        batch.start(MeetingBatch::Operation::Refresh, targets);
+        QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 5000);
+        QCOMPARE(done.first().first().toInt(), 0);
+        QCOMPARE(started.size(), 3);
+        QCOMPARE(results.size(), 3);
+        const auto first = results.at(0).first().toJsonObject();
+        const auto failed = results.at(1).first().toJsonObject();
+        const auto last = results.at(2).first().toJsonObject();
+        QCOMPARE(first.value("requestKey").toString(), "1234/first");
+        QVERIFY(first.value("verified").toBool());
+        QCOMPARE(failed.value("requestKey").toString(), failedKey);
+        QVERIFY(!failed.value("ok").toBool());
+        QVERIFY(!failed.value("verified").toBool());
+        QCOMPARE(failed.value("timedOut").toBool(), fault == "stall");
+        QCOMPARE(window.meetingCountValue_->text(), "0/1");
+        QCOMPARE(window.meetings_.first().microphone, MainWindow::Microphone::Unknown);
+        QCOMPARE(window.meetingCards_.first()->findChild<QPushButton*>("soundButton")->text(), "Read Sound");
+        QCOMPARE(last.value("requestKey").toString(), "1234/last");
+        QVERIFY(last.value("verified").toBool());
+        QVERIFY(first.value("fixturePid") != last.value("fixturePid"));
+    }
+
+    void releaseWorkerRepliesWhileItsInputStaysOpen()
+    {
+        QProcess worker;
+        worker.start(QCoreApplication::applicationDirPath() + "/MeetingController.exe", {"--meeting-batch-worker"});
+        QVERIFY2(worker.waitForStarted(3000), qPrintable(worker.errorString()));
+        for (const QString& handle : QStringList{"0", "ffffffffffffffff"})
+        {
+            const QJsonObject request{
+                {"operation", static_cast<int>(MeetingBatch::Operation::Refresh)},
+                {"windowHandle", handle}, {"requestKey", handle}, {"tabRuntimeId", "missing"}
+            };
+            const auto line = QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n';
+            QCOMPARE(worker.write(line), line.size());
+            QDeadlineTimer deadline(5000);
+            QJsonObject reply;
+            bool initialized = false;
+            while (reply.isEmpty())
+            {
+                QVERIFY(!deadline.hasExpired());
+                if (!worker.canReadLine())
+                {
+                    QVERIFY2(worker.waitForReadyRead(static_cast<int>(deadline.remainingTime())),
+                             qPrintable(worker.errorString()));
+                    continue;
+                }
+                const auto message = QJsonDocument::fromJson(worker.readLine()).object();
+                if (message.value("type").toString() == "initialized")
+                    initialized = message.value("ok").toBool();
+                else if (message.value("type").toString() == "result")
+                    reply = message.value("result").toObject();
+            }
+            QCOMPARE(reply.value("requestKey").toString(), handle);
+            QVERIFY(!reply.value("ok").toBool());
+            if (handle != "0")
+                QVERIFY(initialized);
+        }
+        worker.closeWriteChannel();
+        QVERIFY(worker.waitForFinished(3000));
+        QCOMPARE(worker.exitCode(), 0);
     }
 
     void doubleClickRequestsTheChromeTab()
@@ -637,5 +864,15 @@ private slots:
     }
 };
 
-QTEST_MAIN(MeetingControllerTests)
+int main(int argc, char* argv[])
+{
+    if (argc == 2 && std::strcmp(argv[1], "--meeting-batch-worker") == 0)
+    {
+        QCoreApplication app(argc, argv);
+        return runTestBatchWorker();
+    }
+    QApplication app(argc, argv);
+    MeetingControllerTests tests;
+    return QTest::qExec(&tests, argc, argv);
+}
 #include "MeetingControllerTests.moc"

@@ -56,6 +56,8 @@ Sound refers to Zoom's computer-audio connection, not a separate speaker mute or
 
 **Sound Off All** leaves computer audio for every managed meeting. Sound turns off and the microphone disconnects. Chrome switches to each meeting tab, and each result is verified.
 
+**Mute All Meetings**, **Sound Off All**, and dashboard **Refresh** start on the first click and work through the cards in order. The dashboard shows which meeting is being checked and updates each card as its result arrives. Each meeting has up to 12 seconds. If verification times out, the card shows unread states and the batch continues. **Cancel remaining** finishes the current meeting and skips the cards still waiting. The status bar shows the final counts.
+
 A card shows the last audio states read back from Zoom. If a sound change cannot be verified, both the sound and microphone states are reset to unread and the failure is reported. The controller stops if its meeting tab is no longer selected. A pointer click requires a uniquely identified, enabled join button in the foreground meeting. Windows must confirm that the computed screen point belongs to that button or its text. The controller can also invoke the identified button through its accessibility action.
 
 The following features are **not implemented yet**:

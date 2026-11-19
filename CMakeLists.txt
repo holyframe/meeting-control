@@ -16,6 +16,8 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets)
 
 set(MEETING_CONTROLLER_SOURCES
+    src/MeetingBatch.h
+    src/MeetingBatch.cpp
     src/MainWindow.h
     src/MainWindow.cpp
     src/UiaWorker.h
@@ -74,6 +76,7 @@ if(MEETING_CONTROLLER_BUILD_TESTS)
         ${MEETING_CONTROLLER_SOURCES}
         resources/app.qrc
     )
+    add_dependencies(MeetingControllerTests MeetingController)
     target_include_directories(MeetingControllerTests PRIVATE src)
     target_link_libraries(MeetingControllerTests PRIVATE
         Qt6::Core Qt6::Widgets Qt6::Test ole32 oleaut32 user32 uiautomationcore

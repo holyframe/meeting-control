@@ -14,8 +14,8 @@
 
 The desktop interface follows the supplied dashboard reference:
 
-- A top page bar for Dashboard, Live Diagnostics, Settings, and About. Pick Up, Refresh, and Mute All stay on the dashboard.
-- A dashboard with four summary cards: Total Meetings, Active Meeting, Safety Status, and UIA Connection.
+- A top page bar for Dashboard, Live Diagnostics, Settings, and About. Pick Up and Mute All stay on the dashboard.
+- A dashboard summary row: Mute All Meetings, Meeting Counts (active/total), Sound Off All, UIA Connection, and Pick Up Meeting Tabs. Refresh inside UIA Connection re-reads every meeting's computer-audio connection and updates which cards are active. A meeting card is active when computer audio is connected or the meeting is ready to join it.
 - A meeting-card area in the main workspace.
 - A dedicated Live Diagnostics page opened from the top page bar. Diagnostics are not permanently displayed beside the dashboard.
 - A dark navy/blue visual theme with Segoe UI typography.
@@ -45,11 +45,16 @@ Each managed meeting card offers:
 - **Sound Off** — opens Zoom's audio menu if needed, chooses **Leave Computer Audio**, and verifies that Zoom exposes a join-audio control. This disconnects the microphone as well as incoming sound, while leaving the meeting and video running.
 - **Sound On** brings the meeting window forward and uses the audio chooser Zoom may have opened when you clicked **Sound Off**. It selects **Computer Audio** if needed, then activates **Join Audio by Computer** once. When Windows identifies the visible button under the pointer target, the controller moves the pointer there and clicks it. The card shows **Sound on** after Zoom exposes **Leave Computer Audio**. If you already rejoined manually, pressing **Sound On** just verifies the connection and refreshes the card.
 - **Read Sound** — shown when the connection state has not been read or could not be verified. Reads the state without joining/leaving audio.
-- **⋯** — refresh the microphone or sound state, or remove the meeting from the list.
+- **×** — remove the meeting from this list. Zoom is not changed.
+- The card name can be edited. That name is only for this list; the Chrome tab title is unchanged.
+- Double-click a card to bring its Chrome tab forward. Drag a card onto another card to change their order.
+- **⟳** on the left of the Active label — read the microphone and sound states from Zoom again. Unmute is 1.5 times as wide as Sound On or Sound Off.
 
 Sound refers to Zoom's computer-audio connection, not a separate speaker mute or the Windows volume. **Join Audio** confirms disconnected computer audio; **Leave Computer Audio** confirms a connection, opening the audio menu to read it when necessary. Microphone labels are read separately and cannot by themselves verify sound-on. Conflicting or unrecognized controls are treated as unknown. No sound is inferred from silence or from a successful click alone.
 
-**Mute All Meetings** applies the same read-act-verify sequence to every managed meeting in turn. **Release Active Meeting** only clears the active marker in this app; it does not change Zoom.
+**Mute All Meetings** applies the same read-act-verify sequence to every managed meeting in turn.
+
+**Sound Off All** leaves computer audio for every managed meeting. Sound turns off and the microphone disconnects. Chrome switches to each meeting tab, and each result is verified.
 
 A card shows the last audio states read back from Zoom. If a sound change cannot be verified, both the sound and microphone states are reset to unread and the failure is reported. The controller stops if its meeting tab is no longer selected. A pointer click requires a uniquely identified, enabled join button in the foreground meeting. Windows must confirm that the computed screen point belongs to that button or its text. The controller can also invoke the identified button through its accessibility action.
 

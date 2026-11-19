@@ -598,9 +598,15 @@ std::vector<ZoomMeetingController::Control> ZoomMeetingController::collectContro
         BOOL offscreen = TRUE;
         if (FAILED(element->get_CachedIsOffscreen(&offscreen)) || offscreen)
         {
-            // Accept a misreported chooser control only when the actual
-            // foreground hit-test identifies that same element on screen.
-            if (!chooserControl || !verifiedPoint(automation_.Get(), hwnd, element.Get()))
+            // Chrome often marks Zoom's join button offscreen even while its
+            // box is inside the meeting window. A display:none copy has no box.
+            RECT bounds{}, window{}, visible{};
+            const bool placed = chooserControl
+                && SUCCEEDED(element->get_CurrentBoundingRectangle(&bounds))
+                && !IsRectEmpty(&bounds)
+                && GetWindowRect(hwnd, &window)
+                && IntersectRect(&visible, &bounds, &window);
+            if (!placed && (!chooserControl || !verifiedPoint(automation_.Get(), hwnd, element.Get())))
                 continue;
         }
         if (popupDocument && !withinElement(automation_.Get(), element.Get(), popupDocument))
@@ -887,9 +893,10 @@ QJsonObject ZoomMeetingController::controlAudioConnection(
                     report("Clicking the verified Join Audio by Computer button in Chrome");
                     invoked = clickJoinButton(*point);
                 }
-                else if (isVisibleEnabled(element.Get()) && targetSelected())
+                else if (targetSelected()
+                    && uia::readBooleanProperty(element.Get(), UIA_IsEnabledPropertyId))
                 {
-                    report("Using the join button's accessible action (no confirmed foreground click point)");
+                    report("Using the Join Audio by Computer button's accessible action");
                     invoked = invokeElement(element.Get());
                 }
             }

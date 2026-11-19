@@ -7,6 +7,16 @@ bool namesAction(const QString& text, const QString& action)
     return text == action || text.startsWith(action + " (");
 }
 
+// Zoom's join button is <button>Join Audio by Computer<span class="loading">.
+// The hidden span can be included in the accessible name, so a trailing word
+// such as "loading" is still this button.
+bool namesJoinComputer(const QString& text, const QString& action)
+{
+    return text == action
+        || text.startsWith(action + " ")
+        || text.startsWith(action + "(");
+}
+
 QString microphoneState(const QString& text)
 {
     for (const QString& action : {QString("mute"), QString("unmute")})
@@ -42,7 +52,7 @@ Action actionForName(const QString& name)
                                  QString("join audio by computer"),
                                  QString("connect to computer audio")})
     {
-        if (namesAction(text, action))
+        if (namesJoinComputer(text, action))
             return Action::JoinComputerAudio;
     }
     for (const QString& action : {QString("leave computer audio"), QString("leave audio"),
@@ -183,8 +193,8 @@ Result readConnection(const Backend& backend, int attempts)
             break;
         backend.wait();
     }
-    result.error = "Zoom's computer-audio state could not be read. Open the meeting "
-                   "toolbar and check Live Diagnostics for its audio controls.";
+    result.error = "Could not find the Join Audio or Leave Computer Audio button. "
+                   "The sound state was not changed.";
     return result;
 }
 
@@ -258,7 +268,13 @@ static Result joinComputerAudio(const Backend& backend, Result result, int attem
                     }
                 }
                 result.error = action == Action::SelectComputerAudio
-                    ? "Zoom's Computer Audio tab could not be selected."
+                    ? "Could not select the Computer Audio tab. The meeting was not joined."
+                    : action == Action::JoinComputerAudio
+                    ? "The Join Audio by Computer button was found, but it could not be clicked. "
+                      "The connection is unverified and the meeting was not joined."
+                    : action == Action::JoinAudio
+                    ? "The Join Audio button was found, but it could not be clicked. "
+                      "The connection is unverified and the meeting was not joined."
                     : "Zoom's audio control could not be activated. The connection is unverified.";
                 return result;
             }
@@ -268,14 +284,17 @@ static Result joinComputerAudio(const Backend& backend, Result result, int attem
     }
 
     if (result.observation.joinComputerAvailable && joinInvoked)
-        result.error = "Zoom still shows Join Audio by Computer after activation. "
-                       "The connection is unverified.";
-    else if (!joinInvoked && (toolbarInvoked || chooserSeen))
-        result.error = "Zoom's computer-audio join button did not become available. "
-                       "Check the audio chooser in Chrome and Live Diagnostics.";
+        result.error = "The Join Audio by Computer button was clicked, but Zoom still shows it. "
+                       "The connection is unverified and the meeting was not marked as joined.";
+    else if (!joinInvoked && toolbarInvoked)
+        result.error = "Could not find the Join Audio by Computer button. "
+                       "The Join Audio button was clicked, but that button did not appear. "
+                       "The meeting was not joined.";
+    else if (!joinInvoked && chooserSeen)
+        result.error = "Could not find the Join Audio by Computer button in the audio chooser. "
+                       "The meeting was not joined.";
     else
-        result.error = "Zoom did not confirm the computer-audio connection. "
-                       "The result is unverified.";
+        result.error = "Could not find the Join Audio button. The meeting was not joined.";
     return result;
 }
 

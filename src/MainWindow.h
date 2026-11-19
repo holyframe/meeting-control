@@ -56,6 +56,8 @@ signals:
                            bool connected,
                            const QString& requestKey);
     void muteAllRequested(const QJsonArray& targets);
+    void soundOffAllRequested(const QJsonArray& targets);
+    void refreshConnectionsRequested(const QJsonArray& targets);
     void prepareImportedMeetingsRequested(const QJsonArray& targets);
 
 private slots:
@@ -69,16 +71,20 @@ private slots:
     void onAudioConnectionRead(const QJsonObject& result);
     void onAudioConnectionSet(const QJsonObject& result);
     void onMuteAllFinished(const QJsonArray& results);
+    void onSoundOffAllFinished(const QJsonArray& results);
+    void onRefreshConnectionsFinished(const QJsonArray& results);
     void onImportedMeetingsPrepared(const QJsonArray& results);
     void refreshChromeWindows();
     void inspectSelectedWindow();
     void requestMeetingTabImport();
     void requestMuteAll();
-    void releaseActiveMeeting();
+    void requestSoundOffAll();
+    void requestRefreshConnections();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     enum class Microphone
@@ -96,6 +102,7 @@ private:
         qint64 processId = 0;
         QString tabRuntimeId;
         QString title;
+        QString chromeTabName;
         QString host;
         QString meetingId;
         QString profileName;
@@ -104,6 +111,7 @@ private:
         Sound sound = Sound::Unknown;
 
         QString key() const { return windowHandle + '/' + tabRuntimeId; }
+        QString automationName() const { return chromeTabName.isEmpty() ? title : chromeTabName; }
         quintptr handle() const
         {
             return static_cast<quintptr>(windowHandle.toULongLong(nullptr, 16));
@@ -120,6 +128,7 @@ private:
     void refreshMeetingCards();
     void layoutMeetingCards();
     void removeMeeting(const QString& key);
+    void moveMeeting(const QString& fromKey, const QString& toKey);
     void activateMeeting(const QString& key);
     void readMicrophone(const QString& key);
     void setMicrophone(const QString& key, bool muted);
@@ -130,6 +139,12 @@ private:
     void applyMicrophoneResult(const QJsonObject& result, const QString& action);
     void applyAudioResult(const QJsonObject& result, const QString& action);
     void updateMeetingStates(ManagedMeeting& meeting, const QJsonObject& result);
+    bool meetingCardIsActive(const ManagedMeeting& meeting) const;
+    QFrame* meetingCardFor(QWidget* widget) const;
+    QFrame* meetingCardAt(const QPoint& globalPos) const;
+    void setCardFlag(QFrame* card, const char* name, bool on);
+    void setDropHover(QFrame* card);
+    void clearDrag();
 
     void navigateTo(int pageIndex);
     void appendLog(const QString& message);
@@ -152,9 +167,9 @@ private:
     QPushButton* aboutNavButton_ = nullptr;
 
     QPushButton* dashboardPickUpButton_ = nullptr;
-    QPushButton* dashboardRefreshButton_ = nullptr;
     QPushButton* dashboardMuteAllButton_ = nullptr;
-    QPushButton* releaseActiveButton_ = nullptr;
+    QPushButton* dashboardSoundOffButton_ = nullptr;
+    QPushButton* uiaRefreshButton_ = nullptr;
 
     QPushButton* inspectButton_ = nullptr;
     QComboBox* chromeWindowCombo_ = nullptr;
@@ -162,14 +177,8 @@ private:
     QPlainTextEdit* liveDiagnostics_ = nullptr;
     QPlainTextEdit* accessibilityTree_ = nullptr;
 
-    QLabel* dashboardChromeSummary_ = nullptr;
-
-    QLabel* totalMeetingsValue_ = nullptr;
-    QLabel* totalMeetingsDetail_ = nullptr;
-    QLabel* activeMeetingValue_ = nullptr;
-    QLabel* activeMeetingDetail_ = nullptr;
-    QLabel* safetyValue_ = nullptr;
-    QLabel* safetyDetail_ = nullptr;
+    QLabel* meetingCountValue_ = nullptr;
+    QLabel* meetingCountDetail_ = nullptr;
     QLabel* uiaValue_ = nullptr;
     QLabel* uiaDetail_ = nullptr;
 
@@ -181,7 +190,11 @@ private:
 
     QList<ManagedMeeting> meetings_;
     QList<QFrame*> meetingCards_;
-    QString activeMeetingKey_;
+    QString dragSourceKey_;
+    QPoint dragPressGlobal_;
+    bool dragMoved_ = false;
+    bool dragCursorSet_ = false;
+    QFrame* dropHoverCard_ = nullptr;
 
     bool scanInProgress_ = false;
     bool pickupInProgress_ = false;

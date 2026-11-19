@@ -6,6 +6,7 @@
 #include <QFrame>
 #include <QFontDatabase>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
@@ -59,7 +60,6 @@ class MeetingControllerTests : public QObject
         meeting.sound = sound;
         meeting.microphone = microphone;
         window.meetings_.append(meeting);
-        window.activeMeetingKey_ = meeting.key();
         window.refreshMeetingCards();
     }
 
@@ -90,6 +90,7 @@ private slots:
         row("join", "Join Audio", Action::JoinAudio, Connection::Disconnected);
         row("computer join", "Join with Computer Audio", Action::JoinComputerAudio, Connection::Disconnected);
         row("alternate join", "Join Audio by Computer", Action::JoinComputerAudio, Connection::Disconnected);
+        row("join button with loading text", "Join Audio by Computer loading", Action::JoinComputerAudio, Connection::Disconnected);
         row("connect", "Connect to Computer Audio", Action::JoinComputerAudio, Connection::Disconnected);
         row("leave", "Leave Computer Audio", Action::LeaveAudio, Connection::Connected);
         row("disconnect", "Disconnect Audio", Action::LeaveAudio, Connection::Connected);
@@ -500,10 +501,11 @@ private slots:
         });
         QCOMPARE(window.meetings_.first().sound, MainWindow::Sound::Off);
         QCOMPARE(window.meetings_.first().microphone, MainWindow::Microphone::AudioNotConnected);
-        QCOMPARE(window.activeMeetingKey_, window.meetings_.first().key());
+        QCOMPARE(window.meetings_.first().key(), QString("1234/replacement-tab"));
+        QCOMPARE(window.meetingCards_.first()->objectName(), QString("meetingCardActive"));
+        QCOMPARE(window.meetingCountValue_->text(), QString("1/1"));
         QCOMPARE(window.meetingCards_.first()->findChild<QPushButton*>("soundButton")->text(), "Sound On");
         QCOMPARE(window.meetingCards_.first()->findChild<QLabel*>("soundState")->text(), "Sound off");
-        QCOMPARE(window.safetyValue_->text(), "Verified");
     }
 
     void unverifiedSoundResultClearsCachedStates()
@@ -524,8 +526,60 @@ private slots:
         QCOMPARE(window.meetings_.first().sound, MainWindow::Sound::Unknown);
         QCOMPARE(window.meetings_.first().microphone, MainWindow::Microphone::Unknown);
         QCOMPARE(window.meetingCards_.first()->findChild<QPushButton*>("soundButton")->text(), "Read Sound");
-        QCOMPARE(window.safetyValue_->text(), "Unread");
         QVERIFY(!window.meetingBusy_);
+    }
+
+    void renamesCardWithoutChangingChromeTabName()
+    {
+        MainWindow window;
+        populate(window, MainWindow::Sound::On, MainWindow::Microphone::Muted);
+        window.meetings_.first().chromeTabName = "Audio test meeting";
+        auto* edit = window.meetingCards_.first()->findChild<QLineEdit*>("meetingTitle");
+        QVERIFY(edit);
+        edit->setText("  Standup  ");
+        emit edit->editingFinished();
+        QCOMPARE(window.meetings_.first().title, QString("Standup"));
+        QCOMPARE(window.meetings_.first().chromeTabName, QString("Audio test meeting"));
+        QCOMPARE(window.meetings_.first().automationName(), QString("Audio test meeting"));
+    }
+
+    void reordersMeetingsByDragTarget()
+    {
+        MainWindow window;
+        populate(window, MainWindow::Sound::On, MainWindow::Microphone::Muted);
+        auto second = window.meetings_.first();
+        second.tabRuntimeId = "second-tab";
+        second.title = "Second meeting";
+        second.chromeTabName = "Second meeting";
+        window.meetings_.append(second);
+        window.refreshMeetingCards();
+        window.moveMeeting(second.key(), window.meetings_.first().key());
+        QCOMPARE(window.meetings_.first().title, QString("Second meeting"));
+        QCOMPARE(window.meetings_.last().title, QString("Audio test meeting"));
+    }
+
+    void refreshChecksEveryMeetingConnection()
+    {
+        MainWindow window;
+        populate(window, MainWindow::Sound::On, MainWindow::Microphone::Muted);
+        auto second = window.meetings_.first();
+        second.tabRuntimeId = "second-tab";
+        second.title = "Second meeting";
+        window.meetings_.append(second);
+        QSignalSpy spy(&window, &MainWindow::refreshConnectionsRequested);
+        window.uiaRefreshButton_->click();
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.first().at(0).toJsonArray().size(), 2);
+    }
+
+    void doubleClickRequestsTheChromeTab()
+    {
+        MainWindow window;
+        populate(window, MainWindow::Sound::On, MainWindow::Microphone::Muted);
+        QSignalSpy spy(&window, &MainWindow::activationRequested);
+        QTest::mouseDClick(window.meetingCards_.first(), Qt::LeftButton, Qt::NoModifier, QPoint(8, 8));
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.takeFirst().at(2).toString(), QString("Audio test meeting"));
     }
 
     void rendersCardStates()
@@ -545,8 +599,34 @@ private slots:
         unknown.microphone = MainWindow::Microphone::Unknown;
         window.meetings_.append(unknown);
         window.refreshMeetingCards();
+        QCOMPARE(window.meetingCards_.at(0)->objectName(), QString("meetingCardActive"));
+        QCOMPARE(window.meetingCards_.at(1)->objectName(), QString("meetingCardActive"));
+        QCOMPARE(window.meetingCards_.at(2)->objectName(), QString("meetingCard"));
+        QVERIFY(window.meetingCards_.at(0)->findChild<QLabel*>("activeBadge") != nullptr);
+        QVERIFY(window.meetingCards_.at(1)->findChild<QLabel*>("activeBadge") != nullptr);
+        QVERIFY(window.meetingCards_.at(2)->findChild<QLabel*>("activeBadge") == nullptr);
+        QVERIFY(window.meetingCards_.at(0)->findChild<QPushButton*>("activeRefreshButton") != nullptr);
+        QVERIFY(window.meetingCards_.at(2)->findChild<QPushButton*>("activeRefreshButton") == nullptr);
+        QCOMPARE(window.meetingCountValue_->text(), QString("2/3"));
         window.show();
         QTest::qWait(100);
+        auto* activeCard = window.meetingCards_.at(0);
+        auto* refresh = activeCard->findChild<QPushButton*>("activeRefreshButton");
+        auto* activeLabel = activeCard->findChild<QLabel*>("activeBadge");
+        QVERIFY(refresh->mapTo(activeCard, QPoint()).x() < activeLabel->mapTo(activeCard, QPoint()).x());
+        QPushButton* unmute = nullptr;
+        for (QPushButton* button : activeCard->findChildren<QPushButton*>())
+        {
+            if (button->text().contains(QStringLiteral("Unmute")))
+                unmute = button;
+        }
+        auto* sound = activeCard->findChild<QPushButton*>("soundButton");
+        QVERIFY(unmute != nullptr);
+        QVERIFY(qAbs(unmute->width() * 2 - sound->width() * 3) <= 8);
+        QVERIFY(window.meetingCountValue_->mapTo(&window, QPoint()).x()
+            < window.dashboardSoundOffButton_->mapTo(&window, QPoint()).x());
+        QVERIFY(window.dashboardSoundOffButton_->mapTo(&window, QPoint()).x()
+            < window.uiaValue_->mapTo(&window, QPoint()).x());
         QVERIFY(window.grab().save("meeting-card-sound-states.png"));
         window.resize(1120, 720);
         QTest::qWait(100);
